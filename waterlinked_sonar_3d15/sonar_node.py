@@ -30,6 +30,31 @@ import wlsonar.range_image_protocol as rip
 RIP_IMU_BATCH_TYPE = getattr(rip, 'ImuBatch', None)
 
 
+def _proto_timestamp_to_ros_time(proto_ts, fallback_stamp):
+    """Convert protobuf Timestamp to ROS2 builtin time message.
+
+    RIP message timestamps use protobuf (seconds, nanos). ROS2 expects
+    builtin_interfaces/msg/Time (sec, nanosec).
+    """
+    if proto_ts is None:
+        return fallback_stamp
+
+    try:
+        sec = int(proto_ts.seconds)
+        nanos = int(proto_ts.nanos)
+    except Exception:
+        return fallback_stamp
+
+    # Normalize nanoseconds to [0, 1e9).
+    sec += nanos // 1_000_000_000
+    nanos = nanos % 1_000_000_000
+
+    stamp = fallback_stamp
+    stamp.sec = sec
+    stamp.nanosec = nanos
+    return stamp
+
+
 class SonarNode(Node):
     """Water Linked Sonar 3D-15 driver node."""
 
@@ -356,7 +381,9 @@ class SonarNode(Node):
                 self.get_logger().warn(f'Unexpected decode error: {type(e).__name__}: {e}')
                 continue
 
-            stamp = self.get_clock().now().to_msg()
+            msg_header = getattr(msg, 'header', None)
+            msg_timestamp = getattr(msg_header, 'timestamp', None)
+            stamp = _proto_timestamp_to_ros_time(msg_timestamp, self.get_clock().now().to_msg())
             header = Header(stamp=stamp, frame_id=frame_id)
 
             if isinstance(msg, rip.RangeImage):
@@ -524,7 +551,6 @@ class SonarNode(Node):
 
             imu_msg = Imu()
             # Timestamps are provided in seconds/nanoseconds for each sample
-            # TODO  How to use this together with timestamp of pointcloud data for the transform.
             imu_msg.header.stamp.sec = msg.timestamp[i].seconds
             imu_msg.header.stamp.nanosec = msg.timestamp[i].nanos
             imu_msg.header.frame_id = frame_id
