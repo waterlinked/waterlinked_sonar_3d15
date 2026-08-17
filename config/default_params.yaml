@@ -1,6 +1,9 @@
 sonar_node:
   ros__parameters:
     sonar_ip: "192.168.2.190" # "192.168.194.96"
+    # Optional: replay data from a .sonar file instead of live sonar UDP stream.
+    # Leave empty for live mode.
+    sonar_file: ""
     frame_id: "sonar_link"
 
     # Acoustics
