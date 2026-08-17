@@ -10,6 +10,7 @@ depth images, and intensity images.
 """
 
 import math
+import os
 import socket
 import threading
 import time
@@ -28,6 +29,40 @@ import wlsonar
 import wlsonar.range_image_protocol as rip
 
 
+def _proto_timestamp_to_ros_time(proto_ts, fallback_stamp):
+    """Convert protobuf Timestamp to ROS2 builtin time message."""
+    if proto_ts is None:
+        return fallback_stamp
+
+    try:
+        sec = int(proto_ts.seconds)
+        nanos = int(proto_ts.nanos)
+    except Exception:
+        return fallback_stamp
+
+    sec += nanos // 1_000_000_000
+    nanos = nanos % 1_000_000_000
+
+    stamp = fallback_stamp
+    stamp.sec = sec
+    stamp.nanosec = nanos
+    return stamp
+
+
+def _proto_timestamp_to_seconds(proto_ts) -> float | None:
+    """Convert protobuf Timestamp to float seconds, or None if unavailable."""
+    if proto_ts is None:
+        return None
+
+    try:
+        sec = int(proto_ts.seconds)
+        nanos = int(proto_ts.nanos)
+    except Exception:
+        return None
+
+    return sec + nanos * 1e-9
+
+
 class SonarNode(Node):
     """Water Linked Sonar 3D-15 driver node."""
 
@@ -40,6 +75,9 @@ class SonarNode(Node):
         self._udp_sock = None
         self._recv_thread: Optional[threading.Thread] = None
         self._running = False
+        self._input_mode = 'udp'
+        self._sonar_file_path = ''
+        self._file_playback_finished = False
 
         # Packet statistics (written by recv thread, read by heartbeat timer)
         self._lock = threading.Lock()
@@ -82,6 +120,10 @@ class SonarNode(Node):
         self.declare_parameter('sonar_ip', '192.168.194.96', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
             description='IP address of the Sonar 3D-15'))
+        self.declare_parameter('sonar_file', '', ParameterDescriptor(
+            type=ParameterType.PARAMETER_STRING,
+            description='Optional path to a .sonar recording. When set, playback is used '
+                        'instead of live sonar UDP input.'))
         self.declare_parameter('frame_id', 'sonar_link', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
             description='TF frame ID for published messages'))
@@ -169,6 +211,12 @@ class SonarNode(Node):
     # ──────────────────────────────────────────────────────────────────────
 
     def _connect_and_configure(self):
+        sonar_file = self.get_parameter('sonar_file').get_parameter_value().string_value.strip()
+        if sonar_file:
+            self._input_mode = 'file'
+            self._open_file_and_start_reader(sonar_file)
+            return
+
         ip = self.get_parameter('sonar_ip').get_parameter_value().string_value
         self.get_logger().info(f'Connecting to Sonar 3D-15 at {ip}...')
 
@@ -284,6 +332,87 @@ class SonarNode(Node):
         self._recv_thread.start()
         self.get_logger().info('UDP receiver thread started')
 
+    def _open_file_and_start_reader(self, sonar_file: str):
+        path = os.path.expanduser(sonar_file)
+        if not os.path.exists(path):
+            self.get_logger().error(f'sonar_file does not exist: {path}')
+            return
+
+        self._sonar_file_path = path
+        self._file_playback_finished = False
+        self._running = True
+        self._recv_thread = threading.Thread(target=self._file_receive_loop, daemon=True)
+        self._recv_thread.start()
+        self.get_logger().info(f'Using sonar file input: {path}')
+
+    def _file_receive_loop(self):
+        frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
+        local_pkt_count = 0
+        playback_wall_start: float | None = None
+        playback_msg_start: float | None = None
+
+        try:
+            with open(self._sonar_file_path, 'rb') as f_sonar:
+                while self._running and rclpy.ok():
+                    try:
+                        msg = rip.unpack(f_sonar)
+                    except rip.UnknownProtobufTypeError:
+                        with self._lock:
+                            self._stats_unknown_packets += 1
+                        continue
+                    except EOFError:
+                        self._file_playback_finished = True
+                        self.get_logger().info('Reached end of sonar_file playback')
+                        break
+                    except (rip.CRCMismatchError, rip.BadIDError, rip.ExtraDataError) as e:
+                        with self._lock:
+                            self._stats_decode_errors += 1
+                        self.get_logger().warn(f'File decode error: {e}')
+                        continue
+                    except Exception as e:
+                        with self._lock:
+                            self._stats_decode_errors += 1
+                        self.get_logger().warn(
+                            f'Unexpected file decode error: {type(e).__name__}: {e}')
+                        continue
+
+                    local_pkt_count += 1
+                    with self._lock:
+                        self._stats_udp_packets = local_pkt_count
+
+                    msg_header = getattr(msg, 'header', None)
+                    msg_timestamp = getattr(msg_header, 'timestamp', None)
+
+                    # Reproduce recorded timing by sleeping according to delta from
+                    # the first packet timestamp in the file.
+                    msg_time_s = _proto_timestamp_to_seconds(msg_timestamp)
+                    if msg_time_s is not None:
+                        if playback_wall_start is None or playback_msg_start is None:
+                            playback_wall_start = time.monotonic()
+                            playback_msg_start = msg_time_s
+                        else:
+                            target_wall = playback_wall_start + max(
+                                0.0, msg_time_s - playback_msg_start)
+                            while self._running and rclpy.ok():
+                                remaining = target_wall - time.monotonic()
+                                if remaining <= 0.0:
+                                    break
+                                time.sleep(min(remaining, 0.05))
+
+                    stamp = _proto_timestamp_to_ros_time(
+                        msg_timestamp, self.get_clock().now().to_msg())
+                    header = Header(stamp=stamp, frame_id=frame_id)
+
+                    try:
+                        self._handle_decoded_message(msg, header)
+                    except Exception as e:
+                        if not self._running or not rclpy.ok():
+                            break
+                        self.get_logger().warn(
+                            f'File playback publish error: {type(e).__name__}: {e}')
+        except OSError as e:
+            self.get_logger().error(f'Failed to read sonar_file {self._sonar_file_path}: {e}')
+
     def _udp_receive_loop(self):
         frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         local_pkt_count = 0
@@ -335,34 +464,45 @@ class SonarNode(Node):
                 self.get_logger().warn(f'Unexpected decode error: {type(e).__name__}: {e}')
                 continue
 
-            stamp = self.get_clock().now().to_msg()
+            msg_header = getattr(msg, 'header', None)
+            msg_timestamp = getattr(msg_header, 'timestamp', None)
+            stamp = _proto_timestamp_to_ros_time(msg_timestamp, self.get_clock().now().to_msg())
             header = Header(stamp=stamp, frame_id=frame_id)
 
-            if isinstance(msg, rip.RangeImage):
-                with self._lock:
-                    self._stats_range_images += 1
-                    self._stats_last_seq_id = msg.header.sequence_id
-                    ri_count = self._stats_range_images
-                if ri_count <= 3:
-                    self.get_logger().info(
-                        f'RangeImage: {msg.width}x{msg.height}, '
-                        f'freq={msg.frequency}Hz, '
-                        f'seq={msg.header.sequence_id}')
-                self._publish_camera_info(msg, header)
-                self._publish_range_image(msg, header)
-                self._publish_point_cloud(msg, header)
-            elif isinstance(msg, rip.BitmapImageGreyscale8):
-                with self._lock:
-                    self._stats_bitmap_images += 1
-                    self._stats_last_seq_id = msg.header.sequence_id
-                    bmp_count = self._stats_bitmap_images
-                if bmp_count <= 3:
-                    self.get_logger().info(
-                        f'BitmapImage: {msg.width}x{msg.height}, '
-                        f'freq={msg.frequency}Hz, '
-                        f'seq={msg.header.sequence_id}')
-                self._publish_camera_info(msg, header)
-                self._publish_intensity_image(msg, header)
+            self._handle_decoded_message(msg, header)
+
+    def _handle_decoded_message(self, msg, header: Header):
+        if isinstance(msg, rip.RangeImage):
+            with self._lock:
+                self._stats_range_images += 1
+                self._stats_last_seq_id = msg.header.sequence_id
+                ri_count = self._stats_range_images
+            if ri_count <= 3:
+                self.get_logger().info(
+                    f'RangeImage: {msg.width}x{msg.height}, '
+                    f'freq={msg.frequency}Hz, '
+                    f'seq={msg.header.sequence_id}')
+            self._publish_camera_info(msg, header)
+            self._publish_range_image(msg, header)
+            self._publish_point_cloud(msg, header)
+        elif isinstance(msg, rip.BitmapImageGreyscale8):
+            with self._lock:
+                self._stats_bitmap_images += 1
+                self._stats_last_seq_id = msg.header.sequence_id
+                bmp_count = self._stats_bitmap_images
+            if bmp_count <= 3:
+                self.get_logger().info(
+                    f'BitmapImage: {msg.width}x{msg.height}, '
+                    f'freq={msg.frequency}Hz, '
+                    f'seq={msg.header.sequence_id}')
+            self._publish_camera_info(msg, header)
+            self._publish_intensity_image(msg, header)
+        elif isinstance(msg, rip.ImuData):
+            with self._lock:
+                self._stats_last_seq_id = msg.header.sequence_id
+            print(f'IMU data received: seq={msg.header.sequence_id}, '
+                  f'gyro=({msg.gyro_x:.3f}, {msg.gyro_y:.3f}, {msg.gyro_z:.3f}), '
+                  f'accel=({msg.accel_x:.3f}, {msg.accel_y:.3f}, {msg.accel_z:.3f})')
 
     # ──────────────────────────────────────────────────────────────────────
     # Publishers
@@ -387,6 +527,9 @@ class SonarNode(Node):
         self._pub_range_image.publish(img)
 
     def _publish_intensity_image(self, msg: rip.BitmapImageGreyscale8, header: Header):
+        if msg.type != rip.BitmapImageType.SIGNAL_STRENGTH_IMAGE:
+            return
+
         if self._pub_intensity_image.get_subscription_count() == 0:
             return
 
@@ -497,15 +640,24 @@ class SonarNode(Node):
 
         status = DiagnosticStatus()
         status.name = 'Sonar 3D-15 Receiver'
-        status.hardware_id = self.get_parameter('sonar_ip').get_parameter_value().string_value
+        if self._input_mode == 'file':
+            status.hardware_id = self._sonar_file_path
+        else:
+            status.hardware_id = self.get_parameter('sonar_ip').get_parameter_value().string_value
 
         receiving = udp_pkts > 0 and timeouts < 3
-        if self._recv_thread is None or not self._recv_thread.is_alive():
+        if self._input_mode == 'file' and self._file_playback_finished:
+            status.level = DiagnosticStatus.OK
+            status.message = f'Playback complete ({udp_pkts} packets read)'
+        elif self._recv_thread is None or not self._recv_thread.is_alive():
             status.level = DiagnosticStatus.ERROR
             status.message = 'Receiver thread not running'
         elif not receiving and elapsed > 10.0:
             status.level = DiagnosticStatus.WARN
-            status.message = f'No data (timeouts: {timeouts})'
+            if self._input_mode == 'file':
+                status.message = 'No file data decoded yet'
+            else:
+                status.message = f'No data (timeouts: {timeouts})'
         elif udp_pkts > 0 and range_imgs == 0 and bitmap_imgs == 0:
             status.level = DiagnosticStatus.WARN
             status.message = f'Packets received but none decoded ({unknown} unknown)'
@@ -623,7 +775,7 @@ def main(args=None):
     node = SonarNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
