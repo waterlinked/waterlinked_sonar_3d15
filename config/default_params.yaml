@@ -27,6 +27,7 @@ sonar_node:
     topic_point_cloud: "~/point_cloud"
     topic_range_image: "~/range_image"
     topic_intensity_image: "~/intensity_image"
+    topic_imu: "~/imu"
     topic_camera_info: "~/camera_info"
 
     # Diagnostics timer period in seconds
