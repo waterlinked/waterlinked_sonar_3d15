@@ -195,9 +195,11 @@ class SonarNode(Node):
                     self._sonar.set_range(rmin, rmax)
                     self.get_logger().info(f'Range set to [{rmin}, {rmax}] m')
                 elif param.name == 'imu_output_enabled' and self._sonar:
-                    if self._set_imu_output_enabled(param.value):
-                        self.get_logger().info(
-                            f'IMU output {"enabled" if param.value else "disabled"}')
+                     if not self._set_imu_output_enabled(param.value):
+                         return SetParametersResult(
+                             successful=False, reason='Could not apply IMU output setting')
+                     self.get_logger().info(
+                         f'IMU output {"enabled" if param.value else "disabled"}')
             except wlsonar.VersionException as e:
                 self.get_logger().warn(str(e))
             except Exception as e:
@@ -620,7 +622,7 @@ class SonarNode(Node):
         elif not receiving and elapsed > 10.0:
             status.level = DiagnosticStatus.WARN
             status.message = f'No data (timeouts: {timeouts})'
-        elif udp_pkts > 0 and range_imgs == 0 and bitmap_imgs == 0:
+        elif udp_pkts > 0 and range_imgs == 0 and bitmap_imgs == 0 and imu_batches == 0:
             status.level = DiagnosticStatus.WARN
             status.message = f'Packets received but none decoded ({unknown} unknown)'
         else:

@@ -91,6 +91,7 @@ Topic names are configurable via the `topic_*` parameters (see below). The defau
 | `topic_range_image` | string | `~/range_image` | Topic name for range image output |
 | `topic_intensity_image` | string | `~/intensity_image` | Topic name for intensity image output |
 | `topic_imu` | string | `~/imu` | Topic name for IMU output |
+| `imu_output_enabled` | bool | `true` | Enable IMU batch output (firmware >= 1.8.0) |
 | `topic_camera_info` | string | `~/camera_info` | Topic name for CameraInfo output |
 | `diagnostics_period` | double | `5.0` | Seconds between diagnostic queries |
 
@@ -106,6 +107,7 @@ The following parameters can be changed while the node is running using `ros2 pa
 | `salinity` | `salt` / `fresh` | Requires firmware >= 1.7.0 |
 | `range_min` | `0.5` | Minimum imaging range (meters) |
 | `range_max` | `10.0` | Maximum imaging range (meters) |
+| `imu_output_enabled` | `true` / `false` | Enable IMU batch output (firmware >= 1.8.0) |
 
 First, find the node name:
 
@@ -154,6 +156,17 @@ The package includes a standalone diagnostics node (`sonar_diag`) for benchmarki
 ros2 launch waterlinked_sonar_3d15 sonar_diag.launch.py
 # or with a custom params file:
 ros2 launch waterlinked_sonar_3d15 sonar_diag.launch.py params_file:=/path/to/diag_params.yaml
+```
+
+### Launch with orientation transformation
+
+A launch file is provided to run the sonar with IMU data enabled together with `imu_filter_madgwick` to estimate orientation and publish
+the transform to `world`, so the point cloud can be viewed rotated according to IMU input.
+
+```bash
+ros2 launch waterlinked_sonar_3d15 sonar_imu_orient.launch.py
+# or with a custom params file:
+ros2 launch waterlinked_sonar_3d15 sonar_imu_orient.launch.py params_file:=/path/to/imu_filter_params.yaml
 ```
 
 ### Continuous monitoring
