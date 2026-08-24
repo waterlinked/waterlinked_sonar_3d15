@@ -1,4 +1,5 @@
 # Copyright 2025 Julian Valdez
+# Copyright 2026 Water Linked AS
 #
 # Licensed under the MIT License.
 
@@ -20,12 +21,39 @@ import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import ParameterDescriptor, ParameterType, SetParametersResult
-from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
+from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2, PointField
 from std_msgs.msg import Header
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 
 import wlsonar
 import wlsonar.range_image_protocol as rip
+
+RIP_IMU_BATCH_TYPE = getattr(rip, 'ImuBatch', None)
+
+
+def _proto_timestamp_to_ros_time(proto_ts, fallback_stamp):
+    """Convert protobuf Timestamp to ROS2 builtin time message.
+
+    RIP message timestamps use protobuf (seconds, nanos). ROS2 expects
+    builtin_interfaces/msg/Time (sec, nanosec).
+    """
+    if proto_ts is None:
+        return fallback_stamp
+
+    try:
+        sec = int(proto_ts.seconds)
+        nanos = int(proto_ts.nanos)
+    except Exception:
+        return fallback_stamp
+
+    # Normalize nanoseconds to [0, 1e9).
+    sec += nanos // 1_000_000_000
+    nanos = nanos % 1_000_000_000
+
+    stamp = fallback_stamp
+    stamp.sec = sec
+    stamp.nanosec = nanos
+    return stamp
 
 
 class SonarNode(Node):
@@ -46,6 +74,7 @@ class SonarNode(Node):
         self._stats_udp_packets = 0
         self._stats_range_images = 0
         self._stats_bitmap_images = 0
+        self._stats_imu_batches = 0
         self._stats_unknown_packets = 0
         self._stats_decode_errors = 0
         self._stats_timeouts = 0
@@ -64,6 +93,9 @@ class SonarNode(Node):
         self._pub_camera_info = self.create_publisher(
             CameraInfo,
             self.get_parameter('topic_camera_info').get_parameter_value().string_value, 10)
+        self._pub_imu = self.create_publisher(
+            Imu,
+            self.get_parameter('topic_imu').get_parameter_value().string_value, 10)
         self._pub_diagnostics = self.create_publisher(DiagnosticArray, '/diagnostics', 10)
 
         diag_period = self.get_parameter('diagnostics_period').get_parameter_value().double_value
@@ -88,7 +120,8 @@ class SonarNode(Node):
         self.declare_parameter('acoustics_enabled', True, ParameterDescriptor(
             type=ParameterType.PARAMETER_BOOL,
             description='Enable acoustic imaging on startup'))
-        self.declare_parameter('speed_of_sound', 1480.0, ParameterDescriptor(
+        # Setting the default value of speed_of_sound to 0.0 means internal default speed of sound is used if the user does not specify a value.
+        self.declare_parameter('speed_of_sound', 0.0, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Speed of sound in m/s'))
         self.declare_parameter('mode', 'low-frequency', ParameterDescriptor(
@@ -100,7 +133,7 @@ class SonarNode(Node):
         self.declare_parameter('range_min', 0.3, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Minimum imaging range in meters'))
-        self.declare_parameter('range_max', 15.0, ParameterDescriptor(
+        self.declare_parameter('range_max', 16.0, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Maximum imaging range in meters'))
         self.declare_parameter('udp_mode', 'multicast', ParameterDescriptor(
@@ -119,7 +152,12 @@ class SonarNode(Node):
         self.declare_parameter('diagnostics_period', 5.0, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Period in seconds between diagnostic queries'))
-
+        self.declare_parameter('imu_output_enabled', True, ParameterDescriptor(
+            type=ParameterType.PARAMETER_BOOL,
+            description='Enable IMU batch output from sonar (requires firmware >= 1.8.0)'))
+        self.declare_parameter('imu_frame_id', 'sonar_imu_link', ParameterDescriptor(
+            type=ParameterType.PARAMETER_STRING,
+            description='TF frame ID for published IMU messages'))
         self.declare_parameter('topic_point_cloud', '~/point_cloud', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
             description='Topic name for PointCloud2 output'))
@@ -132,6 +170,9 @@ class SonarNode(Node):
         self.declare_parameter('topic_camera_info', '~/camera_info', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
             description='Topic name for CameraInfo output'))
+        self.declare_parameter('topic_imu', '~/imu', ParameterDescriptor(
+            type=ParameterType.PARAMETER_STRING,
+            description='Topic name for IMU output (sensor_msgs/Imu)'))
 
     def _on_parameter_change(self, params: list[Parameter]) -> SetParametersResult:
         for param in params:
@@ -157,6 +198,12 @@ class SonarNode(Node):
                         rmax = param.value
                     self._sonar.set_range(rmin, rmax)
                     self.get_logger().info(f'Range set to [{rmin}, {rmax}] m')
+                elif param.name == 'imu_output_enabled' and self._sonar:
+                     if not self._set_imu_output_enabled(param.value):
+                         return SetParametersResult(
+                             successful=False, reason='Could not apply IMU output setting')
+                     self.get_logger().info(
+                         f'IMU output {"enabled" if param.value else "disabled"}')
             except wlsonar.VersionException as e:
                 self.get_logger().warn(str(e))
             except Exception as e:
@@ -198,6 +245,7 @@ class SonarNode(Node):
         rmin = self.get_parameter('range_min').get_parameter_value().double_value
         rmax = self.get_parameter('range_max').get_parameter_value().double_value
         udp_mode = self.get_parameter('udp_mode').get_parameter_value().string_value
+        imu_output_enabled = self.get_parameter('imu_output_enabled').get_parameter_value().bool_value
 
         try:
             self._sonar.set_speed_of_sound(sos)
@@ -251,6 +299,10 @@ class SonarNode(Node):
                 self._sonar.set_udp_multicast()
         except Exception as e:
             self.get_logger().error(f'Could not configure UDP output: {e}')
+
+        if self._set_imu_output_enabled(imu_output_enabled):
+            self.get_logger().info(
+                f'IMU batch output: {"enabled" if imu_output_enabled else "disabled"}')
 
     # ──────────────────────────────────────────────────────────────────────
     # UDP receiver
@@ -335,7 +387,9 @@ class SonarNode(Node):
                 self.get_logger().warn(f'Unexpected decode error: {type(e).__name__}: {e}')
                 continue
 
-            stamp = self.get_clock().now().to_msg()
+            msg_header = getattr(msg, 'header', None)
+            msg_timestamp = getattr(msg_header, 'timestamp', None)
+            stamp = _proto_timestamp_to_ros_time(msg_timestamp, self.get_clock().now().to_msg())
             header = Header(stamp=stamp, frame_id=frame_id)
 
             if isinstance(msg, rip.RangeImage):
@@ -363,6 +417,16 @@ class SonarNode(Node):
                         f'seq={msg.header.sequence_id}')
                 self._publish_camera_info(msg, header)
                 self._publish_intensity_image(msg, header)
+            elif RIP_IMU_BATCH_TYPE is not None and isinstance(msg, rip.ImuBatch):
+                with self._lock:
+                    self._stats_imu_batches += 1
+                    imu_count = self._stats_imu_batches
+                if imu_count <= 3:
+                    self.get_logger().info(
+                        f'ImuBatch: samples={msg.samples}, '
+                        f'batch_seq={msg.batch_sequence_id}')
+                imu_frame_id = self.get_parameter('imu_frame_id').get_parameter_value().string_value
+                self._publish_imu_batch(msg, imu_frame_id)
 
     # ──────────────────────────────────────────────────────────────────────
     # Publishers
@@ -475,6 +539,62 @@ class SonarNode(Node):
 
         self._pub_camera_info.publish(ci)
 
+    def _publish_imu_batch(self, msg, frame_id: str):
+        if self._pub_imu is None or self._pub_imu.get_subscription_count() == 0:
+            return
+
+        if len(msg.timestamp) != msg.samples:
+            self.get_logger().warn('Invalid ImuBatch: len(timestamp) != samples')
+            return
+        if len(msg.specific_force) != msg.samples * 3:
+            self.get_logger().warn('Invalid ImuBatch: len(specific_force) != samples*3')
+            return
+        if len(msg.rate_of_turn) != msg.samples * 3:
+            self.get_logger().warn('Invalid ImuBatch: len(rate_of_turn) != samples*3')
+            return
+
+        for i in range(msg.samples):
+            idx = i * 3
+
+            imu_msg = Imu()
+            # Timestamps are provided in seconds/nanoseconds for each sample
+            imu_msg.header.stamp.sec = msg.timestamp[i].seconds
+            imu_msg.header.stamp.nanosec = msg.timestamp[i].nanos
+            imu_msg.header.frame_id = frame_id
+
+            # Orientation is not provided by ImuBatch, mark as unavailable.
+            imu_msg.orientation_covariance[0] = -1.0
+
+            imu_msg.linear_acceleration.x = msg.specific_force[idx]
+            imu_msg.linear_acceleration.y = msg.specific_force[idx + 1]
+            imu_msg.linear_acceleration.z = msg.specific_force[idx + 2]
+
+            imu_msg.angular_velocity.x = msg.rate_of_turn[idx]
+            imu_msg.angular_velocity.y = msg.rate_of_turn[idx + 1]
+            imu_msg.angular_velocity.z = msg.rate_of_turn[idx + 2]
+
+            self._pub_imu.publish(imu_msg)
+
+    def _set_imu_output_enabled(self, enabled: bool) -> bool:
+        if self._sonar is None:
+            return False
+
+        setter = getattr(self._sonar, 'set_output_imu_batch_enabled', None)
+        if setter is None:
+            self.get_logger().warn(
+                'wlsonar package does not expose IMU output control; skipping configuration.')
+            return False
+
+        try:
+            setter(enabled)
+            return True
+        except wlsonar.VersionException:
+            self.get_logger().warn(
+                'Firmware too old for IMU output setting (requires >= 1.8.0). Skipping.')
+        except Exception as e:
+            self.get_logger().warn(f'Could not set IMU output: {e}')
+        return False
+
     # ──────────────────────────────────────────────────────────────────────
     # Heartbeat
     # ──────────────────────────────────────────────────────────────────────
@@ -485,6 +605,7 @@ class SonarNode(Node):
             udp_pkts = self._stats_udp_packets
             range_imgs = self._stats_range_images
             bitmap_imgs = self._stats_bitmap_images
+            imu_batches = self._stats_imu_batches
             unknown = self._stats_unknown_packets
             decode_err = self._stats_decode_errors
             timeouts = self._stats_timeouts
@@ -506,17 +627,20 @@ class SonarNode(Node):
         elif not receiving and elapsed > 10.0:
             status.level = DiagnosticStatus.WARN
             status.message = f'No data (timeouts: {timeouts})'
-        elif udp_pkts > 0 and range_imgs == 0 and bitmap_imgs == 0:
+        elif udp_pkts > 0 and range_imgs == 0 and bitmap_imgs == 0 and imu_batches == 0:
             status.level = DiagnosticStatus.WARN
             status.message = f'Packets received but none decoded ({unknown} unknown)'
         else:
             status.level = DiagnosticStatus.OK
-            status.message = f'Receiving ({range_imgs} range, {bitmap_imgs} bitmap images)'
+            status.message = (
+                f'Receiving ({range_imgs} range, {bitmap_imgs} bitmap, {imu_batches} imu batches)'
+            )
 
         status.values = [
             KeyValue(key='udp_packets_total', value=str(udp_pkts)),
             KeyValue(key='range_images', value=str(range_imgs)),
             KeyValue(key='bitmap_images', value=str(bitmap_imgs)),
+            KeyValue(key='imu_batches', value=str(imu_batches)),
             KeyValue(key='unknown_packets', value=str(unknown)),
             KeyValue(key='decode_errors', value=str(decode_err)),
             KeyValue(key='timeouts', value=str(timeouts)),

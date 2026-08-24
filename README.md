@@ -5,7 +5,7 @@ ROS 2 driver for the [Water Linked Sonar 3D-15](https://www.waterlinked.com/3dso
 ## Features
 
 - **High / low frequency mode** switching (firmware >= 1.7.0)
-- **PointCloud2**, **range image**, and **intensity image** publishing
+- **PointCloud2**, **range image**, **intensity image** and **IMU message** publishing
 - Full sonar configuration via ROS parameters (speed of sound, range, salinity, UDP mode)
 - Runtime parameter reconfiguration
 - Diagnostic publishing (temperature, system status)
@@ -16,7 +16,7 @@ ROS 2 driver for the [Water Linked Sonar 3D-15](https://www.waterlinked.com/3dso
 
 - ROS 2 (Humble / Jazzy / Rolling)
 - Python >= 3.10
-- Water Linked Sonar 3D-15 with firmware >= 1.5.1 (>= 1.7.0 for mode/salinity features)
+- Water Linked Sonar 3D-15 with firmware >= 1.5.1 (>= 1.7.0 for mode/salinity features and >= 1.8.0 for IMU output)
 
 ## Installation
 
@@ -66,6 +66,7 @@ ros2 run waterlinked_sonar_3d15 sonar_node --ros-args \
 | `~/range_image` | `sensor_msgs/Image` (32FC1) | Range image as float32 distances in meters |
 | `~/intensity_image` | `sensor_msgs/Image` (8UC1) | Logarithmic signal strength image |
 | `~/camera_info` | `sensor_msgs/CameraInfo` | Sonar lens model (pinhole projection) |
+| `~/imu` | `sensor_msgs/Imu` | Imu message |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Temperature, firmware, system status |
 
 Topic names are configurable via the `topic_*` parameters (see below). The defaults above use the `~/` prefix, which resolves relative to the node name.
@@ -89,6 +90,8 @@ Topic names are configurable via the `topic_*` parameters (see below). The defau
 | `topic_point_cloud` | string | `~/point_cloud` | Topic name for PointCloud2 output |
 | `topic_range_image` | string | `~/range_image` | Topic name for range image output |
 | `topic_intensity_image` | string | `~/intensity_image` | Topic name for intensity image output |
+| `topic_imu` | string | `~/imu` | Topic name for IMU output |
+| `imu_output_enabled` | bool | `true` | Enable IMU batch output (firmware >= 1.8.0) |
 | `topic_camera_info` | string | `~/camera_info` | Topic name for CameraInfo output |
 | `diagnostics_period` | double | `5.0` | Seconds between diagnostic queries |
 
@@ -104,6 +107,7 @@ The following parameters can be changed while the node is running using `ros2 pa
 | `salinity` | `salt` / `fresh` | Requires firmware >= 1.7.0 |
 | `range_min` | `0.5` | Minimum imaging range (meters) |
 | `range_max` | `10.0` | Maximum imaging range (meters) |
+| `imu_output_enabled` | `true` / `false` | Enable IMU batch output (firmware >= 1.8.0) |
 
 First, find the node name:
 
@@ -138,6 +142,7 @@ graph TD
         C -- "wlsonar.range_image_protocol.unpackb()" --> D[PointCloud2 publisher]
         C -- "wlsonar.range_image_protocol.unpackb()" --> E[range_image publisher]
         C -- "wlsonar.range_image_protocol.unpackb()" --> F[intensity publisher]
+        C -- "wlsonar.range_image_protocol.unpackb()" --> G[imu publisher]
     end
 ```
 
@@ -152,6 +157,22 @@ ros2 launch waterlinked_sonar_3d15 sonar_diag.launch.py
 # or with a custom params file:
 ros2 launch waterlinked_sonar_3d15 sonar_diag.launch.py params_file:=/path/to/diag_params.yaml
 ```
+
+### Launch with orientation transformation (DEMO)
+
+A launch file is provided to run the sonar with IMU data enabled together with `imu_filter_madgwick` to estimate orientation and publish
+the transform to `world`, so the point cloud can be viewed rotated according to IMU input. Dependendency on imu_filter_madgwick. To install:
+
+```bash
+sudo apt install ros-humble-imu-filter-madgwick
+```
+Then to run the node:
+```bash
+ros2 launch waterlinked_sonar_3d15 sonar_imu_orient_demo.launch.py
+# or with a custom params file:
+ros2 launch waterlinked_sonar_3d15 sonar_imu_orient_demo.launch.py params_file:=/path/to/imu_filter_params.yaml
+```
+To view transformed point cloud: start `rviz2`, then add PointCloud2 with topic /sonar_node/point_cloud and use `world` as Fixed Frame in rviz2.
 
 ### Continuous monitoring
 

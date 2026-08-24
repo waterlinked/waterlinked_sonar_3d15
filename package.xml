@@ -2,10 +2,10 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>waterlinked_sonar_3d15</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <description>ROS 2 driver for the Water Linked Sonar 3D-15, built on the official wlsonar Python library.</description>
 
-  <maintainer email="julian.valdez@example.com">Julian Valdez</maintainer>
+  <maintainer email="support@waterlinked.com">Water Linked</maintainer>
   <license>MIT</license>
 
   <url type="repository">https://github.com/smarc-project/waterlinked_sonar_3d15</url>

@@ -1,33 +1,38 @@
 sonar_node:
   ros__parameters:
-    sonar_ip: "192.168.2.190" # "192.168.194.96"
+    sonar_ip: "10.1.2.180" # "192.168.194.96"
     frame_id: "sonar_link"
 
     # Acoustics
     acoustics_enabled: true
-    speed_of_sound: 1480.0
+    speed_of_sound: 0.0
     # mode: "low-frequency" or "high-frequency" (requires firmware >= 1.7.0)
     mode: "low-frequency"
     # salinity: "salt" or "fresh" (requires firmware >= 1.7.0)
     salinity: "salt"
     range_min: 0.3
-    range_max: 15.0
+    range_max: 16.0
 
     # UDP streaming
     # Use "unicast" when running in WSL2 (multicast doesn't traverse the VM boundary)
     udp_mode: "unicast"
     # Local interface IP for multicast join / unicast bind.
     # Set to the IP on the same subnet as the sonar on multi-homed machines.
-    interface_ip: "192.168.2.1"
+    interface_ip: "10.1.2.124"
     # Unicast: sonar sends UDP to this IP:port (must be reachable from sonar)
-    unicast_destination_ip: "192.168.2.1"
+    unicast_destination_ip: "10.1.2.124"
     unicast_destination_port: 4747
 
     # Topic names (use ~/ prefix for node-relative, or absolute like /sonar/points)
     topic_point_cloud: "~/point_cloud"
     topic_range_image: "~/range_image"
     topic_intensity_image: "~/intensity_image"
+    topic_imu: "~/imu"
     topic_camera_info: "~/camera_info"
+
+    # IMU output and rigid offset correction (IMU origin relative to sonar_link)
+    imu_frame_id: "sonar_imu_link"
+    imu_output_enabled: true
 
     # Diagnostics timer period in seconds
     diagnostics_period: 5.0
