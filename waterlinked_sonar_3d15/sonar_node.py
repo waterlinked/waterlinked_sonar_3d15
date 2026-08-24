@@ -1,4 +1,5 @@
 # Copyright 2025 Julian Valdez
+# Copyright 2026 Water Linked AS
 #
 # Licensed under the MIT License.
 
@@ -119,7 +120,8 @@ class SonarNode(Node):
         self.declare_parameter('acoustics_enabled', True, ParameterDescriptor(
             type=ParameterType.PARAMETER_BOOL,
             description='Enable acoustic imaging on startup'))
-        self.declare_parameter('speed_of_sound', 1480.0, ParameterDescriptor(
+        # Setting the default value of speed_of_sound to 0.0 means internal default speed of sound is used if the user does not specify a value.
+        self.declare_parameter('speed_of_sound', 0.0, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Speed of sound in m/s'))
         self.declare_parameter('mode', 'low-frequency', ParameterDescriptor(
@@ -131,7 +133,7 @@ class SonarNode(Node):
         self.declare_parameter('range_min', 0.3, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Minimum imaging range in meters'))
-        self.declare_parameter('range_max', 15.0, ParameterDescriptor(
+        self.declare_parameter('range_max', 16.0, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Maximum imaging range in meters'))
         self.declare_parameter('udp_mode', 'multicast', ParameterDescriptor(
@@ -153,7 +155,9 @@ class SonarNode(Node):
         self.declare_parameter('imu_output_enabled', True, ParameterDescriptor(
             type=ParameterType.PARAMETER_BOOL,
             description='Enable IMU batch output from sonar (requires firmware >= 1.8.0)'))
-
+        self.declare_parameter('imu_frame_id', 'sonar_imu_link', ParameterDescriptor(
+            type=ParameterType.PARAMETER_STRING,
+            description='TF frame ID for published IMU messages'))
         self.declare_parameter('topic_point_cloud', '~/point_cloud', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
             description='Topic name for PointCloud2 output'))
@@ -421,7 +425,8 @@ class SonarNode(Node):
                     self.get_logger().info(
                         f'ImuBatch: samples={msg.samples}, '
                         f'batch_seq={msg.batch_sequence_id}')
-                self._publish_imu_batch(msg, frame_id)
+                imu_frame_id = self.get_parameter('imu_frame_id').get_parameter_value().string_value
+                self._publish_imu_batch(msg, imu_frame_id)
 
     # ──────────────────────────────────────────────────────────────────────
     # Publishers
@@ -535,7 +540,7 @@ class SonarNode(Node):
         self._pub_camera_info.publish(ci)
 
     def _publish_imu_batch(self, msg, frame_id: str):
-        if self._pub_imu.get_subscription_count() == 0:
+        if self._pub_imu is None or self._pub_imu.get_subscription_count() == 0:
             return
 
         if len(msg.timestamp) != msg.samples:

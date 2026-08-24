@@ -17,7 +17,7 @@ setup(
     ],
     install_requires=[
         'setuptools',
-        'wlsonar>=0.5.0',
+        'wlsonar>=0.6.0',
         'numpy',
     ],
     zip_safe=True,

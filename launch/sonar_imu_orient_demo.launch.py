@@ -6,7 +6,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-CONFIG_FILE = 'pinchy_params.yaml'
+CONFIG_FILE = 'default_params.yaml'
 IMU_FILTER_CONFIG_FILE = 'imu_filter_params.yaml'
 
 

@@ -158,16 +158,21 @@ ros2 launch waterlinked_sonar_3d15 sonar_diag.launch.py
 ros2 launch waterlinked_sonar_3d15 sonar_diag.launch.py params_file:=/path/to/diag_params.yaml
 ```
 
-### Launch with orientation transformation
+### Launch with orientation transformation (DEMO)
 
 A launch file is provided to run the sonar with IMU data enabled together with `imu_filter_madgwick` to estimate orientation and publish
-the transform to `world`, so the point cloud can be viewed rotated according to IMU input.
+the transform to `world`, so the point cloud can be viewed rotated according to IMU input. Dependendency on imu_filter_madgwick. To install:
 
 ```bash
-ros2 launch waterlinked_sonar_3d15 sonar_imu_orient.launch.py
-# or with a custom params file:
-ros2 launch waterlinked_sonar_3d15 sonar_imu_orient.launch.py params_file:=/path/to/imu_filter_params.yaml
+sudo apt install ros-humble-imu-filter-madgwick
 ```
+Then to run the node:
+```bash
+ros2 launch waterlinked_sonar_3d15 sonar_imu_orient_demo.launch.py
+# or with a custom params file:
+ros2 launch waterlinked_sonar_3d15 sonar_imu_orient_demo.launch.py params_file:=/path/to/imu_filter_params.yaml
+```
+To view transformed point cloud: start `rviz2`, then add PointCloud2 with topic /sonar_node/point_cloud and use `world` as Fixed Frame in rviz2.
 
 ### Continuous monitoring
 
