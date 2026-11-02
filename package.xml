@@ -8,12 +8,14 @@
   <maintainer email="support@waterlinked.com">Water Linked</maintainer>
   <license>MIT</license>
 
-  <url type="repository">https://github.com/smarc-project/waterlinked_sonar_3d15</url>
+  <url type="repository">https://github.com/waterlinked/waterlinked_sonar_3d15</url>
 
   <buildtool_depend>ament_python</buildtool_depend>
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>diagnostic_msgs</exec_depend>
   <exec_depend>sensor_msgs_py</exec_depend>

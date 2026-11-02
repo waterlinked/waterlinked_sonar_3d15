@@ -36,6 +36,10 @@ class SonarDiagNode(Node):
         self._running = False
 
         self._lock = threading.Lock()
+        self._udp_packets = 0
+        self._decode_errors = 0
+        self._unknown_packets = 0
+        self._other_messages = 0
 
         # Per-message-type arrival timestamps (monotonic) for rate calculation
         self._range_times: collections.deque = collections.deque(maxlen=30)
@@ -150,21 +154,41 @@ class SonarDiagNode(Node):
     def _udp_receive_loop(self):
         while self._running and rclpy.ok():
             try:
-                data, _addr = self._udp_sock.recvfrom(wlsonar.UDP_MAX_DATAGRAM_SIZE)
+                data, addr = self._udp_sock.recvfrom(wlsonar.UDP_MAX_DATAGRAM_SIZE)
             except (TimeoutError, socket.timeout):
                 continue
-            except OSError:
+            except OSError as e:
                 if self._running:
-                    self.get_logger().error('UDP socket error')
+                    self.get_logger().error(f'UDP socket error: {e}')
                 break
 
             now = time.monotonic()
+            with self._lock:
+                self._udp_packets += 1
+                packet_count = self._udp_packets
+            if packet_count == 1:
+                self.get_logger().info(
+                    f'First UDP packet from {addr[0]}:{addr[1]} ({len(data)} bytes)')
 
             try:
                 msg = rip.unpackb(data)
             except rip.UnknownProtobufTypeError:
+                with self._lock:
+                    self._unknown_packets += 1
                 continue
-            except Exception:
+            except Exception as e:
+                with self._lock:
+                    self._decode_errors += 1
+                    error_count = self._decode_errors
+                if error_count <= 3:
+                    self.get_logger().warn(f'UDP decode error: {type(e).__name__}: {e}')
+                continue
+
+            # IMU batches and other valid RIP messages have different fields.
+            # Filter them before accessing image header, dimensions or frequency.
+            if not isinstance(msg, (rip.RangeImage, rip.BitmapImageGreyscale8)):
+                with self._lock:
+                    self._other_messages += 1
                 continue
 
             seq = msg.header.sequence_id
@@ -231,8 +255,23 @@ class SonarDiagNode(Node):
             rm = self._last_range_meta
             bm = self._last_bitmap_meta
             offsets = list(self._offsets)
+            packets = self._udp_packets
+            decode_errors = self._decode_errors
+            unknown = self._unknown_packets
+            other = self._other_messages
 
         lines = ['--- Sonar Diagnostics ---']
+        receiver_alive = self._recv_thread is not None and self._recv_thread.is_alive()
+        lines.append(
+            f'  UDP: {packets} packets, {decode_errors} decode errors, '
+            f'{unknown} unknown types, {other} non-image messages; '
+            f'receiver {"running" if receiver_alive else "stopped"}')
+        if not receiver_alive:
+            lines.append('  Receiver is stopped; check connection/socket errors above.')
+        elif packets == 0:
+            lines.append(
+                '  No UDP received; check interface/destination IP, firewall, '
+                'and whether another sonar node is using the same unicast port.')
 
         if rm:
             lines.append(

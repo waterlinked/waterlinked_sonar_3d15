@@ -1,10 +1,10 @@
 sonar_diag:
   ros__parameters:
     # Connection
-    sonar_ip: "192.168.32.109"
+    sonar_ip: "192.168.1.61"
     udp_mode: "unicast"
-    interface_ip: "192.168.32.190"
-    unicast_destination_ip: "192.168.32.190"
+    interface_ip: "192.168.1.94"
+    unicast_destination_ip: "192.168.1.94"
     unicast_destination_port: 4747
 
     # Diagnostics mode

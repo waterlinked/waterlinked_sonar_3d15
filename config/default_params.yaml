@@ -1,7 +1,10 @@
 sonar_node:
   ros__parameters:
-    sonar_ip: "10.1.2.180" # "192.168.194.96"
+    sonar_ip: "192.168.1.61" # "192.168.194.96"
     frame_id: "sonar_link"
+    # Image/CameraInfo frame; empty derives sonar_link_optical from frame_id.
+    # The driver publishes the static TF to this frame.
+    optical_frame_id: ""
 
     # Acoustics
     acoustics_enabled: true
@@ -18,9 +21,9 @@ sonar_node:
     udp_mode: "unicast"
     # Local interface IP for multicast join / unicast bind.
     # Set to the IP on the same subnet as the sonar on multi-homed machines.
-    interface_ip: "10.1.2.124"
+    interface_ip: "192.168.1.94"
     # Unicast: sonar sends UDP to this IP:port (must be reachable from sonar)
-    unicast_destination_ip: "10.1.2.124"
+    unicast_destination_ip: "192.168.1.94"
     unicast_destination_port: 4747
 
     # Topic names (use ~/ prefix for node-relative, or absolute like /sonar/points)

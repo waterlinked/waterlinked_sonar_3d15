@@ -71,14 +71,25 @@ ros2 run waterlinked_sonar_3d15 sonar_node --ros-args \
 
 Topic names are configurable via the `topic_*` parameters (see below). The defaults above use the `~/` prefix, which resolves relative to the node name.
 
+Images and `CameraInfo` use `<frame_id>_optical` by default. The node publishes
+a static TF so optical +Z points along the native point cloud's +X axis.
+Image rows are reversed to agree with the vertical direction of the installed
+`wlsonar` XYZ conversion. Point cloud coordinates are unchanged.
+Use `sonar_link` (or another connected frame) as the RViz Fixed Frame.
+The pinhole `CameraInfo` represents the nominal FOV, not an exact projection
+of the sonar's uniformly spaced yaw/pitch samples; corners can differ.
+
 ## Parameters
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `sonar_ip` | string | `192.168.194.96` | IP address of the Sonar 3D-15 |
-| `frame_id` | string | `sonar_link` | TF frame ID for published messages |
+| `chipid` | string | Hardware reported | Read-only sonar chip ID; empty if unavailable |
+| `firmware_version` | string | Hardware reported | Read-only firmware version; empty if unavailable |
+| `frame_id` | string | `sonar_link` | TF frame ID for point clouds |
+| `optical_frame_id` | string | `""` | Image/CameraInfo frame; empty uses `<frame_id>_optical` |
 | `acoustics_enabled` | bool | `true` | Enable acoustic imaging |
-| `speed_of_sound` | double | `1480.0` | Speed of sound in m/s |
+| `speed_of_sound` | double | `0.0` | Speed of sound in m/s; `0.0` uses the sonar's internal default (auto) |
 | `mode` | string | `low-frequency` | `low-frequency` or `high-frequency` (fw >= 1.7.0) |
 | `salinity` | string | `salt` | `salt` or `fresh` (fw >= 1.7.0) |
 | `range_min` | double | `0.3` | Minimum imaging range in meters |
@@ -95,7 +106,39 @@ Topic names are configurable via the `topic_*` parameters (see below). The defau
 | `topic_camera_info` | string | `~/camera_info` | Topic name for CameraInfo output |
 | `diagnostics_period` | double | `5.0` | Seconds between diagnostic queries |
 
+### Speed of sound
+
+`speed_of_sound: 0.0` selects the sonar's internal default (auto); it does not
+mean a physical sound speed of zero. Set a positive value to specify an
+explicit speed in m/s.
+
+`ros2 param get /sonar_node speed_of_sound` returns the configured ROS parameter,
+not the actual speed used by the sonar. In default/auto mode it therefore
+returns `0.0`. The effective value for each received range image is available
+in the RIP `RangeImage.speed_of_sound` field.
+
+### Reading device identity
+
+The node reads device identity at startup. These parameters cannot be changed
+at runtime, and YAML/command-line overrides are ignored:
+
+```bash
+ros2 param get /sonar_node chipid
+ros2 param get /sonar_node firmware_version
+```
+
+They contain empty strings if the startup connection fails. Restart the node
+after reconnecting or updating the sonar firmware to refresh them.
+
 ### Changing parameters at runtime
+
+On firmware older than 1.8.0, startup falls back to `imu_output_enabled: false`
+and continues sonar imaging. Enabling IMU output at runtime is rejected with
+the firmware version error; disabling it is accepted as a no-op. Runtime IMU
+changes are also rejected if the sonar is disconnected or the installed
+`wlsonar` lacks IMU output control. If an IMU configuration request fails due
+to a communication error at startup, the requested parameter is retained and
+a warning reports that the hardware state is unconfirmed.
 
 The following parameters can be changed while the node is running using `ros2 param set`:
 
@@ -129,7 +172,7 @@ You can also inspect the current value of any parameter:
 ros2 param get <node_name> mode
 ```
 
-All other parameters (`sonar_ip`, `frame_id`, `udp_mode`, `interface_ip`, `unicast_destination_ip`, `unicast_destination_port`, `topic_*`, `diagnostics_period`) are read-only after startup and require a node restart to change.
+All other parameters (`sonar_ip`, `frame_id`, `optical_frame_id`, `udp_mode`, `interface_ip`, `unicast_destination_ip`, `unicast_destination_port`, `topic_*`, `diagnostics_period`) are read-only after startup and require a node restart to change.
 
 ## Architecture
 
@@ -150,6 +193,16 @@ graph TD
 
 The package includes a standalone diagnostics node (`sonar_diag`) for benchmarking the sonar.
 
+Run it with the regular sonar driver stopped when using unicast: both nodes
+configure the sonar's UDP destination and cannot bind the same local IP/port.
+Set `interface_ip` and `unicast_destination_ip` in `config/diag_params.yaml` to
+the receiving computer's IP, and `sonar_ip` to the sonar's IP.
+
+The report includes UDP packet counts, decode errors and receiver status.
+If it reports zero packets with the receiver running, check the configured IPs,
+firewall and network path. Non-image messages such as IMU batches are counted
+separately and excluded from image rate and timing measurements.
+
 ### Launch with parameters file
 
 ```bash
@@ -158,21 +211,61 @@ ros2 launch waterlinked_sonar_3d15 sonar_diag.launch.py
 ros2 launch waterlinked_sonar_3d15 sonar_diag.launch.py params_file:=/path/to/diag_params.yaml
 ```
 
-### Launch with orientation transformation (DEMO)
+## Launch with IMU orientation
 
-A launch file is provided to run the sonar with IMU data enabled together with `imu_filter_madgwick` to estimate orientation and publish
-the transform to `world`, so the point cloud can be viewed rotated according to IMU input. Dependendency on imu_filter_madgwick. To install:
+`sonar_with_imu_orientation.launch.py` starts the sonar driver and
+`imu_filter_madgwick` to estimate orientation from the sonar's accelerometer
+and gyroscope. Source your ROS 2 environment, then install the filter for
+your ROS distribution (if not already installed):
 
 ```bash
-sudo apt install ros-humble-imu-filter-madgwick
+sudo apt install ros-${ROS_DISTRO}-imu-filter-madgwick
 ```
-Then to run the node:
+
+After building the package and sourcing your workspace, launch both nodes:
+
 ```bash
-ros2 launch waterlinked_sonar_3d15 sonar_imu_orient_demo.launch.py
-# or with a custom params file:
-ros2 launch waterlinked_sonar_3d15 sonar_imu_orient_demo.launch.py params_file:=/path/to/imu_filter_params.yaml
+ros2 launch waterlinked_sonar_3d15 sonar_with_imu_orientation.launch.py
 ```
-To view transformed point cloud: start `rviz2`, then add PointCloud2 with topic /sonar_node/point_cloud and use `world` as Fixed Frame in rviz2.
+
+By default, the launch uses `config/default_params.yaml` for the sonar and
+`config/imu_filter_params.yaml` for the filter. Keep `imu_output_enabled: true`
+in the sonar configuration (requires firmware >= 1.8.0). To override either
+configuration, use its separate launch argument:
+
+```bash
+ros2 launch waterlinked_sonar_3d15 sonar_with_imu_orientation.launch.py \
+    params_file:=/absolute/path/to/default_params.yaml \
+    imu_filter_params_file:=/absolute/path/to/imu_filter_params.yaml
+```
+
+With the default configuration and no namespace, the driver publishes raw IMU
+data on `/sonar_node/imu`, and the filter publishes orientation estimates on
+`/imu/data` and a TF from `world` to `sonar_imu_link`.
+
+The launch also publishes the static mounting transform from `sonar_imu_link`
+to `sonar_link`. It uses the earlier demo's translation of
+`(-0.022, -0.046, -0.003)` meters and zero rotation. These values describe the
+sonar origin in the IMU frame; verify them against your mounting geometry.
+Override them with `mount_x`, `mount_y`, `mount_z` (meters) and `mount_roll`,
+`mount_pitch`, `mount_yaw` (radians). If your robot URDF already supplies this
+transform, launch with `publish_mount_tf:=false`.
+
+Use the `sonar_frame_id` and `imu_frame_id` launch arguments to change the frame
+names; these override the corresponding sonar YAML parameters. The default TF
+chain for viewing the point cloud is:
+
+```text
+world -> sonar_imu_link -> sonar_link -> sonar_link_optical
+```
+
+The sonar driver publishes the final optical-frame transform. Start `rviz2`,
+set **Fixed Frame** to `world`, and add a
+**PointCloud2** display using `/sonar_node/point_cloud`.
+
+The default filter uses `use_mag: false`: roll and pitch are gravity referenced,
+but yaw has no absolute heading reference and can drift. This setup estimates
+orientation only; it does not track the sonar's position.
 
 ### Continuous monitoring
 
