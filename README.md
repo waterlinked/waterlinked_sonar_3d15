@@ -241,12 +241,12 @@ ros2 launch waterlinked_sonar_3d15 sonar_with_imu_orientation.launch.py \
 
 With the default configuration and no namespace, the driver publishes raw IMU
 data on `/sonar_node/imu`, and the filter publishes orientation estimates on
-`/imu/data` and a TF from `world` to `sonar_imu_link`.
+`/imu/data` and a TF from `sonar_imu_link` to `world`.
 
-The launch also publishes the static mounting transform from `sonar_imu_link`
-to `sonar_link`. It uses the earlier demo's translation of
+The launch also publishes the static mounting transform from `sonar_link`
+to `sonar_imu_link`. It uses the internal IMU's position offset of
 `(-0.022, -0.046, -0.003)` meters and zero rotation. These values describe the
-sonar origin in the IMU frame; verify them against your mounting geometry.
+IMU origin in the sonar frame; rotations describe the IMU relative to the sonar.
 Override them with `mount_x`, `mount_y`, `mount_z` (meters) and `mount_roll`,
 `mount_pitch`, `mount_yaw` (radians). If your robot URDF already supplies this
 transform, launch with `publish_mount_tf:=false`.
@@ -256,10 +256,13 @@ names; these override the corresponding sonar YAML parameters. The default TF
 chain for viewing the point cloud is:
 
 ```text
-world -> sonar_imu_link -> sonar_link -> sonar_link_optical
+sonar_link -> sonar_imu_link -> world
+sonar_link -> sonar_link_optical
 ```
 
-The sonar driver publishes the final optical-frame transform. Start `rviz2`,
+The filter uses `reverse_tf: true` to keep a single parent for each frame;
+preserve this setting in custom filter configurations for this TF tree.
+The sonar driver publishes the optical-frame transform. Start `rviz2`,
 set **Fixed Frame** to `world`, and add a
 **PointCloud2** display using `/sonar_node/point_cloud`.
 

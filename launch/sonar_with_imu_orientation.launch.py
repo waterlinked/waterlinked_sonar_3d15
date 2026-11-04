@@ -40,16 +40,16 @@ def generate_launch_description():
             description='Raw IMU frame; overrides imu_frame_id in the sonar YAML'),
         DeclareLaunchArgument(
             'publish_mount_tf', default_value='true',
-            description='Publish IMU-to-sonar TF; disable if supplied by your robot URDF'),
+            description='Publish sonar-to-IMU TF; disable if supplied by your robot URDF'),
         *[
             DeclareLaunchArgument(name, default_value=value, description=description)
             for name, value, description in [
-                ('mount_x', '-0.022', 'Sonar origin X in the IMU frame, meters'),
-                ('mount_y', '-0.046', 'Sonar origin Y in the IMU frame, meters'),
-                ('mount_z', '-0.003', 'Sonar origin Z in the IMU frame, meters'),
-                ('mount_roll', '0.0', 'Sonar roll relative to IMU, radians'),
-                ('mount_pitch', '0.0', 'Sonar pitch relative to IMU, radians'),
-                ('mount_yaw', '0.0', 'Sonar yaw relative to IMU, radians'),
+                ('mount_x', '-0.022', 'IMU origin X in the sonar frame, meters'),
+                ('mount_y', '-0.046', 'IMU origin Y in the sonar frame, meters'),
+                ('mount_z', '-0.003', 'IMU origin Z in the sonar frame, meters'),
+                ('mount_roll', '0.0', 'IMU roll relative to sonar, radians'),
+                ('mount_pitch', '0.0', 'IMU pitch relative to sonar, radians'),
+                ('mount_yaw', '0.0', 'IMU yaw relative to sonar, radians'),
             ]
         ],
         Node(
@@ -83,7 +83,7 @@ def generate_launch_description():
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
-            name='imu_to_sonar_static_tf',
+            name='sonar_to_imu_static_tf',
             namespace=LaunchConfiguration('namespace'),
             condition=IfCondition(LaunchConfiguration('publish_mount_tf')),
             arguments=[
@@ -93,8 +93,8 @@ def generate_launch_description():
                 '--roll', LaunchConfiguration('mount_roll'),
                 '--pitch', LaunchConfiguration('mount_pitch'),
                 '--yaw', LaunchConfiguration('mount_yaw'),
-                '--frame-id', LaunchConfiguration('imu_frame_id'),
-                '--child-frame-id', LaunchConfiguration('sonar_frame_id'),
+                '--frame-id', LaunchConfiguration('sonar_frame_id'),
+                '--child-frame-id', LaunchConfiguration('imu_frame_id'),
             ],
             output='screen',
         ),

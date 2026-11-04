@@ -32,6 +32,7 @@ from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 import wlsonar
 import wlsonar.range_image_protocol as rip
 
+# check if ImuBatch exists in the rip module
 RIP_IMU_BATCH_TYPE = getattr(rip, 'ImuBatch', None)
 
 
@@ -127,6 +128,7 @@ class SonarNode(Node):
             description='TF frame ID for point clouds in native wlsonar coordinates'))
         self.declare_parameter('optical_frame_id', '', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
+            read_only=True,
             description='Image/CameraInfo frame; empty uses frame_id + "_optical"'))
         self.declare_parameter('acoustics_enabled', True, ParameterDescriptor(
             type=ParameterType.PARAMETER_BOOL,
