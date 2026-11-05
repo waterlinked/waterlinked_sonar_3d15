@@ -29,7 +29,6 @@ setup(
     entry_points={
         'console_scripts': [
             'sonar_node = waterlinked_sonar_3d15.sonar_node:main',
-            'sonar_diag = waterlinked_sonar_3d15.sonar_diag:main',
         ],
     },
 )

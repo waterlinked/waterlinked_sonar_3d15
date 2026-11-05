@@ -189,28 +189,6 @@ graph TD
     end
 ```
 
-## Diagnostics Tool
-
-The package includes a standalone diagnostics node (`sonar_diag`) for benchmarking the sonar.
-
-Run it with the regular sonar driver stopped when using unicast: both nodes
-configure the sonar's UDP destination and cannot bind the same local IP/port.
-Set `interface_ip` and `unicast_destination_ip` in `config/diag_params.yaml` to
-the receiving computer's IP, and `sonar_ip` to the sonar's IP.
-
-The report includes UDP packet counts, decode errors and receiver status.
-If it reports zero packets with the receiver running, check the configured IPs,
-firewall and network path. Non-image messages such as IMU batches are counted
-separately and excluded from image rate and timing measurements.
-
-### Launch with parameters file
-
-```bash
-ros2 launch waterlinked_sonar_3d15 sonar_diag.launch.py
-# or with a custom params file:
-ros2 launch waterlinked_sonar_3d15 sonar_diag.launch.py params_file:=/path/to/diag_params.yaml
-```
-
 ## Launch with IMU orientation
 
 `sonar_with_imu_orientation.launch.py` starts the sonar driver and
@@ -269,51 +247,6 @@ set **Fixed Frame** to `world`, and add a
 The default filter uses `use_mag: false`: roll and pitch are gravity referenced,
 but yaw has no absolute heading reference and can drift. This setup estimates
 orientation only; it does not track the sonar's position.
-
-### Continuous monitoring
-
-Prints live data rates and range/intensity image timing offsets every second:
-
-```bash
-ros2 run waterlinked_sonar_3d15 sonar_diag --ros-args \
-    -p sonar_ip:=192.168.2.190 \
-    -p interface_ip:=192.168.2.1
-```
-
-Example output:
-
-```
-[INFO] --- Sonar Diagnostics ---
-[INFO]   RangeImage:  4.2 Hz  (seq 1042, 150x16, freq 750000 Hz)
-[INFO]   BitmapImage: 4.1 Hz  (seq 1042, 150x16, freq 750000 Hz)
-[INFO]   RI-BI offset: 12.3 ms avg (last 10 pairs)
-```
-
-### Mode-switch latency test
-
-Measures how long it takes to switch between low-frequency and high-frequency modes, and how long until data resumes after each switch:
-
-```bash
-ros2 run waterlinked_sonar_3d15 sonar_diag --ros-args \
-    -p sonar_ip:=192.168.2.190 \
-    -p interface_ip:=192.168.2.1 \
-    -p test_switch:=true \
-    -p cycles:=3
-```
-
-Reports API call latency, data blackout duration, and confirms the resolution changed by logging the first image dimensions after each switch.
-
-### Diagnostics parameters
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `sonar_ip` | string | `192.168.194.96` | IP address of the Sonar 3D-15 |
-| `udp_mode` | string | `multicast` | `multicast` or `unicast` |
-| `interface_ip` | string | `0.0.0.0` | Local interface IP for socket bind |
-| `unicast_destination_ip` | string | `""` | Unicast destination IP |
-| `unicast_destination_port` | int | `0` | Unicast destination port |
-| `test_switch` | bool | `false` | Run mode-switch test instead of monitoring |
-| `cycles` | int | `3` | Number of switch cycles for the test |
 
 ## Sonar Modes
 
