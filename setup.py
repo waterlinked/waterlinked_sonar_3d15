@@ -7,7 +7,7 @@ package_name = 'waterlinked_sonar_3d15'
 
 setup(
     name=package_name,
-    version='0.1.0',
+    version='0.2.0',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
@@ -17,19 +17,18 @@ setup(
     ],
     install_requires=[
         'setuptools',
-        'wlsonar>=0.5.0',
+        'wlsonar>=0.5.5,<0.6',
         'numpy',
     ],
     zip_safe=True,
-    maintainer='Julian Valdez',
-    maintainer_email='julian.valdez@example.com',
+    maintainer='Water Linked AS',
+    maintainer_email='support@waterlinked.com',
     description='ROS 2 driver for the Water Linked Sonar 3D-15.',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'sonar_node = waterlinked_sonar_3d15.sonar_node:main',
-            'sonar_diag = waterlinked_sonar_3d15.sonar_diag:main',
         ],
     },
 )
