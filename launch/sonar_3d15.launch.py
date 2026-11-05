@@ -6,7 +6,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-CONFIG_FILE = 'pinchy_params.yaml'
+CONFIG_FILE = 'default_params.yaml'
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('waterlinked_sonar_3d15')

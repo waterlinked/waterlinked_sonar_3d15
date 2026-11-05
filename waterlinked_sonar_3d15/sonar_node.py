@@ -1,4 +1,5 @@
 # Copyright 2025 Julian Valdez
+# Copyright 2026 Water Linked AS
 #
 # Licensed under the MIT License.
 
@@ -16,17 +17,49 @@ import threading
 import time
 from typing import Optional
 
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from geometry_msgs.msg import TransformStamped
+
 import numpy as np
+
+from rcl_interfaces.msg import ParameterDescriptor, ParameterType, SetParametersResult
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rcl_interfaces.msg import ParameterDescriptor, ParameterType, SetParametersResult
-from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
+from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2, PointField
 from std_msgs.msg import Header
-from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 
 import wlsonar
 import wlsonar.range_image_protocol as rip
+
+# check if ImuBatch exists in the rip module
+RIP_IMU_BATCH_TYPE = getattr(rip, 'ImuBatch', None)
+
+
+def _proto_timestamp_to_ros_time(proto_ts, fallback_stamp):
+    """Convert protobuf Timestamp to ROS2 builtin time message.
+
+    RIP message timestamps use protobuf (seconds, nanos). ROS2 expects
+    builtin_interfaces/msg/Time (sec, nanosec).
+    """
+    if proto_ts is None:
+        return fallback_stamp
+
+    try:
+        sec = int(proto_ts.seconds)
+        nanos = int(proto_ts.nanos)
+    except Exception:
+        return fallback_stamp
+
+    # Normalize nanoseconds to [0, 1e9).
+    sec += nanos // 1_000_000_000
+    nanos = nanos % 1_000_000_000
+
+    stamp = fallback_stamp
+    stamp.sec = sec
+    stamp.nanosec = nanos
+    return stamp
 
 
 def _proto_timestamp_to_ros_time(proto_ts, fallback_stamp):
@@ -70,6 +103,7 @@ class SonarNode(Node):
         super().__init__('sonar_node')
 
         self._declare_parameters()
+        self._setup_optical_frame()
 
         self._sonar: Optional[wlsonar.Sonar3D] = None
         self._udp_sock = None
@@ -84,6 +118,7 @@ class SonarNode(Node):
         self._stats_udp_packets = 0
         self._stats_range_images = 0
         self._stats_bitmap_images = 0
+        self._stats_imu_batches = 0
         self._stats_unknown_packets = 0
         self._stats_decode_errors = 0
         self._stats_timeouts = 0
@@ -102,15 +137,21 @@ class SonarNode(Node):
         self._pub_camera_info = self.create_publisher(
             CameraInfo,
             self.get_parameter('topic_camera_info').get_parameter_value().string_value, 10)
+        self._pub_imu = self.create_publisher(
+            Imu,
+            self.get_parameter('topic_imu').get_parameter_value().string_value, 10)
         self._pub_diagnostics = self.create_publisher(DiagnosticArray, '/diagnostics', 10)
 
         diag_period = self.get_parameter('diagnostics_period').get_parameter_value().double_value
         self._diag_timer = self.create_timer(diag_period, self._diagnostics_callback)
         self._heartbeat_timer = self.create_timer(1.0, self._heartbeat_callback)
 
-        self.add_on_set_parameters_callback(self._on_parameter_change)
+        about = self._connect_and_configure()
+        self._declare_device_parameters(about)
 
-        self._connect_and_configure()
+        # Startup can reconcile unsupported settings without invoking hardware
+        # callbacks again while updating the declared parameter values.
+        self.add_on_set_parameters_callback(self._on_parameter_change)
 
     # ──────────────────────────────────────────────────────────────────────
     # Parameters
@@ -126,11 +167,16 @@ class SonarNode(Node):
                         'instead of live sonar UDP input.'))
         self.declare_parameter('frame_id', 'sonar_link', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
-            description='TF frame ID for published messages'))
+            description='TF frame ID for point clouds in native wlsonar coordinates'))
+        self.declare_parameter('optical_frame_id', '', ParameterDescriptor(
+            type=ParameterType.PARAMETER_STRING,
+            read_only=True,
+            description='Image/CameraInfo frame; empty uses frame_id + "_optical"'))
         self.declare_parameter('acoustics_enabled', True, ParameterDescriptor(
             type=ParameterType.PARAMETER_BOOL,
             description='Enable acoustic imaging on startup'))
-        self.declare_parameter('speed_of_sound', 1480.0, ParameterDescriptor(
+        # Setting the default value of speed_of_sound to 0.0 means internal default speed of sound is used if the user does not specify a value.
+        self.declare_parameter('speed_of_sound', 0.0, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Speed of sound in m/s'))
         self.declare_parameter('mode', 'low-frequency', ParameterDescriptor(
@@ -142,7 +188,7 @@ class SonarNode(Node):
         self.declare_parameter('range_min', 0.3, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Minimum imaging range in meters'))
-        self.declare_parameter('range_max', 15.0, ParameterDescriptor(
+        self.declare_parameter('range_max', 16.0, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Maximum imaging range in meters'))
         self.declare_parameter('udp_mode', 'multicast', ParameterDescriptor(
@@ -161,7 +207,12 @@ class SonarNode(Node):
         self.declare_parameter('diagnostics_period', 5.0, ParameterDescriptor(
             type=ParameterType.PARAMETER_DOUBLE,
             description='Period in seconds between diagnostic queries'))
-
+        self.declare_parameter('imu_output_enabled', True, ParameterDescriptor(
+            type=ParameterType.PARAMETER_BOOL,
+            description='Enable IMU batch output from sonar (requires firmware >= 1.8.0)'))
+        self.declare_parameter('imu_frame_id', 'sonar_imu_link', ParameterDescriptor(
+            type=ParameterType.PARAMETER_STRING,
+            description='TF frame ID for published IMU messages'))
         self.declare_parameter('topic_point_cloud', '~/point_cloud', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
             description='Topic name for PointCloud2 output'))
@@ -174,6 +225,23 @@ class SonarNode(Node):
         self.declare_parameter('topic_camera_info', '~/camera_info', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
             description='Topic name for CameraInfo output'))
+        self.declare_parameter('topic_imu', '~/imu', ParameterDescriptor(
+            type=ParameterType.PARAMETER_STRING,
+            description='Topic name for IMU output (sensor_msgs/Imu)'))
+
+    def _declare_device_parameters(self, about):
+        """Expose device identity as immutable hardware-reported parameters."""
+        for name, value, description in [
+            ('chipid', about.chipid if about else '', 'Sonar chip ID reported at startup'),
+            ('firmware_version', about.version_short if about else '',
+             'Sonar firmware version reported at startup'),
+        ]:
+            self.declare_parameter(
+                name, value, ParameterDescriptor(
+                    type=ParameterType.PARAMETER_STRING,
+                    read_only=True,
+                    description=description + '; empty if unavailable'),
+                ignore_override=True)
 
     def _on_parameter_change(self, params: list[Parameter]) -> SetParametersResult:
         for param in params:
@@ -199,6 +267,14 @@ class SonarNode(Node):
                         rmax = param.value
                     self._sonar.set_range(rmin, rmax)
                     self.get_logger().info(f'Range set to [{rmin}, {rmax}] m')
+                elif param.name == 'imu_output_enabled':
+                    try:
+                        self._set_imu_output_enabled(param.value)
+                    except Exception as e:
+                        self.get_logger().warn(f'Could not set IMU output: {e}')
+                        return SetParametersResult(successful=False, reason=str(e))
+                    self.get_logger().info(
+                        f'IMU output {"enabled" if param.value else "disabled"}')
             except wlsonar.VersionException as e:
                 self.get_logger().warn(str(e))
             except Exception as e:
@@ -225,6 +301,7 @@ class SonarNode(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to connect to sonar at {ip}: {e}')
             self.get_logger().error('Node will not publish data. Check IP and network.')
+            self.set_parameters([Parameter('imu_output_enabled', value=False)])
             return
 
         about = self._sonar.about()
@@ -234,6 +311,7 @@ class SonarNode(Node):
 
         self._apply_initial_configuration()
         self._open_udp_and_start_receiver()
+        return about
 
     def _apply_initial_configuration(self):
         if self._sonar is None:
@@ -246,6 +324,7 @@ class SonarNode(Node):
         rmin = self.get_parameter('range_min').get_parameter_value().double_value
         rmax = self.get_parameter('range_max').get_parameter_value().double_value
         udp_mode = self.get_parameter('udp_mode').get_parameter_value().string_value
+        imu_output_enabled = self.get_parameter('imu_output_enabled').get_parameter_value().bool_value
 
         try:
             self._sonar.set_speed_of_sound(sos)
@@ -299,6 +378,19 @@ class SonarNode(Node):
                 self._sonar.set_udp_multicast()
         except Exception as e:
             self.get_logger().error(f'Could not configure UDP output: {e}')
+
+        try:
+            self._set_imu_output_enabled(imu_output_enabled)
+        except (wlsonar.VersionException, NotImplementedError) as e:
+            self.set_parameters([Parameter('imu_output_enabled', value=False)])
+            self.get_logger().warn(f'{e}; imu_output_enabled set to false. Imaging will continue.')
+        except Exception as e:
+            # A transport failure does not tell us whether output is enabled.
+            # Keep the requested setting, but do not report it as applied.
+            self.get_logger().warn(f'IMU output state unconfirmed: {e}')
+        else:
+            self.get_logger().info(
+                f'IMU batch output: {"enabled" if imu_output_enabled else "disabled"}')
 
     # ──────────────────────────────────────────────────────────────────────
     # UDP receiver
@@ -508,15 +600,43 @@ class SonarNode(Node):
     # Publishers
     # ──────────────────────────────────────────────────────────────────────
 
+    def _setup_optical_frame(self):
+        """Publish the rotation from native sonar coordinates to optical axes."""
+        frame_id = self.get_parameter('frame_id').value
+        self._optical_frame_id = (
+            self.get_parameter('optical_frame_id').value or f'{frame_id}_optical')
+        if self._optical_frame_id == frame_id:
+            raise ValueError('optical_frame_id must differ from frame_id')
+
+        transform = TransformStamped()
+        transform.header.stamp = self.get_clock().now().to_msg()
+        transform.header.frame_id = frame_id
+        transform.child_frame_id = self._optical_frame_id
+        # Optical -> sonar: (x, y, z) -> (z, x, y).
+        # In particular, the camera's +Z viewing axis is sonar +X.
+        transform.transform.rotation.x = 0.5
+        transform.transform.rotation.y = 0.5
+        transform.transform.rotation.z = 0.5
+        transform.transform.rotation.w = 0.5
+        self._optical_tf = StaticTransformBroadcaster(self)
+        self._optical_tf.sendTransform(transform)
+
+    def _image_header(self, header: Header) -> Header:
+        """Preserve acquisition time without mutating the point cloud header."""
+        return Header(stamp=header.stamp, frame_id=self._optical_frame_id)
+
     def _publish_range_image(self, msg: rip.RangeImage, header: Header):
         if self._pub_range_image.get_subscription_count() == 0:
             return
 
         distances = wlsonar.range_image_to_distance(msg)
         arr = np.array(distances, dtype=np.float32).reshape((msg.height, msg.width))
+        # wlsonar uses z = -range * sin(pitch): source rows run toward
+        # sonar -Z. Optical image rows must instead run toward sonar +Z.
+        arr = arr[::-1, :]
 
         img = Image()
-        img.header = header
+        img.header = self._image_header(header)
         img.height = msg.height
         img.width = msg.width
         img.encoding = '32FC1'
@@ -535,9 +655,10 @@ class SonarNode(Node):
 
         pixels = wlsonar.bitmap_image_to_strength_log(msg)
         arr = np.array(pixels, dtype=np.uint8).reshape((msg.height, msg.width))
+        arr = arr[::-1, :]
 
         img = Image()
-        img.header = header
+        img.header = self._image_header(header)
         img.height = msg.height
         img.width = msg.width
         img.encoding = '8UC1'
@@ -585,8 +706,9 @@ class SonarNode(Node):
 
         Encodes the sonar's angular FOV as a pinhole-equivalent projection so
         that standard ROS tools can relate pixel coordinates to bearing angles.
-        The K matrix maps (azimuth_px, elevation_px) → bearing in the same way
-        a pinhole camera maps (u, v) → ray direction.
+        TF connects the optical +Z viewing axis to the cloud's +X axis.
+        The nominal FOV matches; uniform sonar yaw/pitch sampling cannot be
+        represented exactly by a pinhole projection, especially at corners.
         """
         if self._pub_camera_info.get_subscription_count() == 0:
             return
@@ -601,11 +723,11 @@ class SonarNode(Node):
         cy = msg.height / 2.0
 
         ci = CameraInfo()
-        ci.header = header
+        ci.header = self._image_header(header)
         ci.width = msg.width
         ci.height = msg.height
-        ci.distortion_model = 'none'
-        ci.d = []
+        ci.distortion_model = 'plumb_bob'
+        ci.d = [0.0] * 5
         ci.k = [fx, 0.0, cx,
                 0.0, fy, cy,
                 0.0, 0.0, 1.0]
@@ -618,6 +740,59 @@ class SonarNode(Node):
 
         self._pub_camera_info.publish(ci)
 
+    def _publish_imu_batch(self, msg, frame_id: str):
+        if self._pub_imu is None or self._pub_imu.get_subscription_count() == 0:
+            return
+
+        if len(msg.timestamp) != msg.samples:
+            self.get_logger().warn('Invalid ImuBatch: len(timestamp) != samples')
+            return
+        if len(msg.specific_force) != msg.samples * 3:
+            self.get_logger().warn('Invalid ImuBatch: len(specific_force) != samples*3')
+            return
+        if len(msg.rate_of_turn) != msg.samples * 3:
+            self.get_logger().warn('Invalid ImuBatch: len(rate_of_turn) != samples*3')
+            return
+
+        for i in range(msg.samples):
+            idx = i * 3
+
+            imu_msg = Imu()
+            # Timestamps are provided in seconds/nanoseconds for each sample
+            imu_msg.header.stamp.sec = msg.timestamp[i].seconds
+            imu_msg.header.stamp.nanosec = msg.timestamp[i].nanos
+            imu_msg.header.frame_id = frame_id
+
+            # Orientation is not provided by ImuBatch, mark as unavailable.
+            imu_msg.orientation_covariance[0] = -1.0
+
+            imu_msg.linear_acceleration.x = msg.specific_force[idx]
+            imu_msg.linear_acceleration.y = msg.specific_force[idx + 1]
+            imu_msg.linear_acceleration.z = msg.specific_force[idx + 2]
+
+            imu_msg.angular_velocity.x = msg.rate_of_turn[idx]
+            imu_msg.angular_velocity.y = msg.rate_of_turn[idx + 1]
+            imu_msg.angular_velocity.z = msg.rate_of_turn[idx + 2]
+
+            self._pub_imu.publish(imu_msg)
+
+    def _set_imu_output_enabled(self, enabled: bool) -> None:
+        """Apply IMU output or raise an error explaining why it was rejected."""
+        if self._sonar is None:
+            raise RuntimeError('Cannot configure IMU output: sonar is not connected')
+
+        setter = getattr(self._sonar, 'set_output_imu_batch_enabled', None)
+        if setter is None:
+            raise NotImplementedError('Installed wlsonar does not expose IMU output control')
+
+        try:
+            setter(enabled)
+        except wlsonar.VersionException:
+            # Older firmware has no IMU batch output to disable. Accept false
+            # as a no-op, but reject enabling it with the library's version error.
+            if enabled:
+                raise
+
     # ──────────────────────────────────────────────────────────────────────
     # Heartbeat
     # ──────────────────────────────────────────────────────────────────────
@@ -628,6 +803,7 @@ class SonarNode(Node):
             udp_pkts = self._stats_udp_packets
             range_imgs = self._stats_range_images
             bitmap_imgs = self._stats_bitmap_images
+            imu_batches = self._stats_imu_batches
             unknown = self._stats_unknown_packets
             decode_err = self._stats_decode_errors
             timeouts = self._stats_timeouts
@@ -663,12 +839,15 @@ class SonarNode(Node):
             status.message = f'Packets received but none decoded ({unknown} unknown)'
         else:
             status.level = DiagnosticStatus.OK
-            status.message = f'Receiving ({range_imgs} range, {bitmap_imgs} bitmap images)'
+            status.message = (
+                f'Receiving ({range_imgs} range, {bitmap_imgs} bitmap, {imu_batches} imu batches)'
+            )
 
         status.values = [
             KeyValue(key='udp_packets_total', value=str(udp_pkts)),
             KeyValue(key='range_images', value=str(range_imgs)),
             KeyValue(key='bitmap_images', value=str(bitmap_imgs)),
+            KeyValue(key='imu_batches', value=str(imu_batches)),
             KeyValue(key='unknown_packets', value=str(unknown)),
             KeyValue(key='decode_errors', value=str(decode_err)),
             KeyValue(key='timeouts', value=str(timeouts)),
