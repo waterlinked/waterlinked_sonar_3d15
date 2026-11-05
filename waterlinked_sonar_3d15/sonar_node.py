@@ -589,12 +589,16 @@ class SonarNode(Node):
                     f'seq={msg.header.sequence_id}')
             self._publish_camera_info(msg, header)
             self._publish_intensity_image(msg, header)
-        elif isinstance(msg, rip.ImuData):
+        elif RIP_IMU_BATCH_TYPE is not None and isinstance(msg, rip.ImuBatch):
             with self._lock:
-                self._stats_last_seq_id = msg.header.sequence_id
-            print(f'IMU data received: seq={msg.header.sequence_id}, '
-                  f'gyro=({msg.gyro_x:.3f}, {msg.gyro_y:.3f}, {msg.gyro_z:.3f}), '
-                  f'accel=({msg.accel_x:.3f}, {msg.accel_y:.3f}, {msg.accel_z:.3f})')
+                self._stats_imu_batches += 1
+                imu_count = self._stats_imu_batches
+            if imu_count <= 3:
+                self.get_logger().info(
+                    f'ImuBatch: samples={msg.samples}, '
+                    f'batch_seq={msg.batch_sequence_id}')
+            imu_frame_id = self.get_parameter('imu_frame_id').get_parameter_value().string_value
+            self._publish_imu_batch(msg, imu_frame_id)
 
     # ──────────────────────────────────────────────────────────────────────
     # Publishers
