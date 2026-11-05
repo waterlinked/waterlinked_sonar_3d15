@@ -49,6 +49,16 @@ ros2 launch waterlinked_sonar_3d15 sonar_3d15.launch.py \
     params_file:=/path/to/your_params.yaml
 ```
 
+### Replay from a .sonar file
+
+```bash
+ros2 run waterlinked_sonar_3d15 sonar_node --ros-args \
+    -p sonar_file:=/path/to/recording.sonar
+```
+
+When `sonar_file` is set, the node does not connect to the sonar over HTTP/UDP and instead reads packets from the file.
+Replay is paced in real time using the recorded message timestamp deltas.
+
 ### Run the node directly
 
 ```bash
@@ -84,6 +94,8 @@ of the sonar's uniformly spaced yaw/pitch samples; corners can differ.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `sonar_ip` | string | `192.168.194.96` | IP address of the Sonar 3D-15 |
+| `sonar_file` | string | `""` | Optional path to a `.sonar` recording; enables file playback mode instead of live UDP |
+| `frame_id` | string | `sonar_link` | TF frame ID for published messages |
 | `chipid` | string | Hardware reported | Read-only sonar chip ID; empty if unavailable |
 | `firmware_version` | string | Hardware reported | Read-only firmware version; empty if unavailable |
 | `frame_id` | string | `sonar_link` | TF frame ID for point clouds |
