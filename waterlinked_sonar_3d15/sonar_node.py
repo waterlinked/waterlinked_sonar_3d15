@@ -461,6 +461,8 @@ class SonarNode(Node):
                             self._stats_decode_errors += 1
                         self.get_logger().warn(f'File decode error: {e}')
                         continue
+                    except OSError:
+                        raise
                     except Exception as e:
                         with self._lock:
                             self._stats_decode_errors += 1
