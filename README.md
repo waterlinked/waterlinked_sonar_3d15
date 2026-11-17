@@ -218,6 +218,17 @@ After building the package and sourcing your workspace, launch both nodes:
 ros2 launch waterlinked_sonar_3d15 sonar_with_imu_orientation.launch.py
 ```
 
+To estimate orientation while replaying a recording containing IMU packets:
+
+```bash
+ros2 launch waterlinked_sonar_3d15 sonar_with_imu_orientation.launch.py \
+    sonar_file:=/absolute/path/to/recording.sonar \
+    imu_output_enabled:=true
+```
+
+These arguments override the sonar YAML values when provided. File playback
+requires recorded IMU packets; enabling IMU output cannot add missing data.
+
 By default, the launch uses `config/default_params.yaml` for the sonar and
 `config/imu_filter_params.yaml` for the filter. Keep `imu_output_enabled: true`
 in the sonar configuration (requires firmware >= 1.8.0). To override either

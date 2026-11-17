@@ -2,13 +2,37 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 CONFIG_FILE = 'default_params.yaml'
 IMU_FILTER_CONFIG_FILE = 'imu_filter_params.yaml'
+
+
+def _launch_sonar(context):
+    overrides = {
+        'frame_id': LaunchConfiguration('sonar_frame_id'),
+        'imu_frame_id': LaunchConfiguration('imu_frame_id'),
+    }
+    sonar_file = LaunchConfiguration('sonar_file').perform(context)
+    if sonar_file:
+        overrides['sonar_file'] = sonar_file
+    imu_output = LaunchConfiguration('imu_output_enabled').perform(context).lower()
+    if imu_output:
+        if imu_output not in ('true', 'false'):
+            raise ValueError('imu_output_enabled must be true or false')
+        overrides['imu_output_enabled'] = imu_output == 'true'
+    return [Node(
+        package='waterlinked_sonar_3d15',
+        executable='sonar_node',
+        name='sonar_node',
+        namespace=LaunchConfiguration('namespace'),
+        parameters=[LaunchConfiguration('params_file'), overrides],
+        output='screen',
+        emulate_tty=True,
+    )]
 
 
 def generate_launch_description():
@@ -27,6 +51,12 @@ def generate_launch_description():
             default_value=default_filter_params_file,
             description='Full path to the IMU filter parameter YAML file',
         ),
+        DeclareLaunchArgument(
+            'sonar_file', default_value='',
+            description='Recording path; empty preserves the sonar YAML setting'),
+        DeclareLaunchArgument(
+            'imu_output_enabled', default_value='',
+            description='Override IMU output with true/false; empty preserves the sonar YAML'),
         DeclareLaunchArgument(
             'namespace',
             default_value='',
@@ -52,21 +82,7 @@ def generate_launch_description():
                 ('mount_yaw', '0.0', 'IMU yaw relative to sonar, radians'),
             ]
         ],
-        Node(
-            package='waterlinked_sonar_3d15',
-            executable='sonar_node',
-            name='sonar_node',
-            namespace=LaunchConfiguration('namespace'),
-            parameters=[
-                LaunchConfiguration('params_file'),
-                {
-                    'frame_id': LaunchConfiguration('sonar_frame_id'),
-                    'imu_frame_id': LaunchConfiguration('imu_frame_id'),
-                },
-            ],
-            output='screen',
-            emulate_tty=True,
-        ),
+        OpaqueFunction(function=_launch_sonar),
         Node(
             package='imu_filter_madgwick',
             executable='imu_filter_madgwick_node',
