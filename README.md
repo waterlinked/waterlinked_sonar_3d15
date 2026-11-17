@@ -129,6 +129,34 @@ not the actual speed used by the sonar. In default/auto mode it therefore
 returns `0.0`. The effective value for each received range image is available
 in the RIP `RangeImage.speed_of_sound` field.
 
+### Reading current device settings
+
+Use `~/get_device_settings` to query the sonar's current configuration over
+HTTP on demand. This uses the standard `rcl_interfaces/srv/GetParameters`
+service type and does not publish an extra topic or change ROS parameters.
+
+```bash
+ros2 service call /sonar_node/get_device_settings rcl_interfaces/srv/GetParameters \
+    "{names: [mode, speed_of_sound, range_min, range_max]}"
+```
+
+Supported names are `mode`, `speed_of_sound`, `range_min`, `range_max`,
+`salinity`, `acoustics_enabled`, and `imu_output_enabled`. Response values
+follow the requested order and use the standard `ParameterValue` fields:
+`type: 3` / `double_value` for numeric settings, `type: 4` / `string_value`
+for mode and salinity, and `type: 1` / `bool_value` for switches. Minimum and
+maximum range share one device query per request.
+
+`ros2 param get` continues to return the node's configured value; this service
+reads the device directly, including changes made through its web interface.
+The speed-of-sound getter returns the device's configured setting; the
+effective speed used for a frame is reported in the RIP packet.
+
+Unknown names, unsupported firmware features, and failed device reads return
+`type: 0` (`PARAMETER_NOT_SET`) for the affected entries and log the reason.
+During file playback or when disconnected, all requested values are unavailable
+(`type: 0`); startup defaults are not returned as device readings.
+
 ### Reading device identity
 
 The node reads device identity at startup. These parameters cannot be changed

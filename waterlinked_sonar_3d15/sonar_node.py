@@ -22,7 +22,8 @@ from geometry_msgs.msg import TransformStamped
 
 import numpy as np
 
-from rcl_interfaces.msg import ParameterDescriptor, ParameterType, SetParametersResult
+from rcl_interfaces.msg import ParameterDescriptor, ParameterType, ParameterValue, SetParametersResult
+from rcl_interfaces.srv import GetParameters
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -152,6 +153,8 @@ class SonarNode(Node):
         # Startup can reconcile unsupported settings without invoking hardware
         # callbacks again while updating the declared parameter values.
         self.add_on_set_parameters_callback(self._on_parameter_change)
+        self._srv_get_device_settings = self.create_service(
+            GetParameters, '~/get_device_settings', self._get_device_settings_callback)
 
     # ──────────────────────────────────────────────────────────────────────
     # Parameters
@@ -242,6 +245,46 @@ class SonarNode(Node):
                     read_only=True,
                     description=description + '; empty if unavailable'),
                 ignore_override=True)
+
+    def _get_device_settings_callback(self, request, response):
+        """Query current device configuration without changing ROS parameters."""
+        getters = {
+            'mode': ('get_mode', None),
+            'speed_of_sound': ('get_speed_of_sound', None),
+            'range_min': ('get_range', 0),
+            'range_max': ('get_range', 1),
+            'salinity': ('get_salinity', None),
+            'acoustics_enabled': ('get_acoustics_enabled', None),
+            'imu_output_enabled': ('get_output_imu_batch_enabled', None),
+        }
+        results = {}
+        response.values = []
+        if self._input_mode == 'file' or self._sonar is None:
+            self.get_logger().warn(
+                'Device settings unavailable: file playback or sonar not connected')
+            response.values = [ParameterValue() for _ in request.names]
+            return response
+
+        for name in request.names:
+            value = ParameterValue()
+            if name not in getters:
+                self.get_logger().warn(f'Unknown device setting: {name}')
+            else:
+                getter, index = getters[name]
+                # Query each endpoint once per request, including the shared
+                # range endpoint, and never fall back to a configured ROS value.
+                if getter not in results:
+                    try:
+                        results[getter] = getattr(self._sonar, getter)()
+                    except Exception as e:
+                        self.get_logger().warn(f'Could not read device setting {name}: {e}')
+                        results[getter] = None
+                result = results[getter]
+                if result is not None:
+                    result = result if index is None else result[index]
+                    value = Parameter(name, value=result).get_parameter_value()
+            response.values.append(value)
+        return response
 
     def _on_parameter_change(self, params: list[Parameter]) -> SetParametersResult:
         for param in params:
