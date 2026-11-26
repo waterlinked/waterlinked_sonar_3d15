@@ -83,9 +83,10 @@ Topic names are configurable via the `topic_*` parameters (see below). The defau
 
 Set `point_cloud_intensity_enabled: true` in the startup YAML or pass
 `--ros-args -p point_cloud_intensity_enabled:=true` to `ros2 run` to add a
-`UINT16` `intensity` field. The driver matches range and signal-strength
-packets by sequence ID with a 100 ms matching window. It publishes XYZ with
-intensity set to `0` when matching strength data is missing or unusable.
+`UINT16` `intensity` field. The driver pairs queued range and signal-strength
+packets by sequence ID and keeps matched pairs until publication. A range
+frame becomes eligible to publish after 100 ms without a match. It uses
+intensity `0` when matching strength data is missing or unusable.
 `~/intensity_image` publishes logarithmic signal strength independently.
 
 Images and `CameraInfo` use `<frame_id>_optical` by default. The node publishes

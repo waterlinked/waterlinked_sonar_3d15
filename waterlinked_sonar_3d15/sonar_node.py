@@ -767,7 +767,10 @@ class SonarNode(Node):
             strengths.setdefault(msg.header.sequence_id, (now, msg))
             self._drain_pending_point_clouds(now)
             if len(strengths) > POINT_CLOUD_PENDING_LIMIT:
-                strengths.pop(next(iter(strengths)))
+                # Both queues have the same limit, so at least one bitmap is unpaired.
+                oldest_unpaired = next(
+                    seq_id for seq_id in strengths if seq_id not in self._pending_cloud_ranges)
+                strengths.pop(oldest_unpaired)
 
     def _flush_pending_point_clouds(self, *, force: bool = False):
         with self._point_cloud_lock:
@@ -782,13 +785,9 @@ class SonarNode(Node):
             seq_id = next(iter(ranges))
             arrival, msg, header = ranges[seq_id]
             strength_entry = strengths.get(seq_id)
-            if strength_entry is not None:
-                strength_arrival, _ = strength_entry
-                if abs(strength_arrival - arrival) > POINT_CLOUD_STRENGTH_WAIT_S:
-                    strengths.pop(seq_id)
-                    strength_entry = None
             if (strength_entry is None and arrival > cutoff and not force
                     and len(ranges) <= POINT_CLOUD_PENDING_LIMIT):
+                # no matching strength found, and can wait a bit more for one: don't publish yet
                 break
             ranges.pop(seq_id)
             strengths.pop(seq_id, None)
