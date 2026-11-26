@@ -25,6 +25,7 @@ import numpy as np
 from rcl_interfaces.msg import ParameterDescriptor, ParameterType, ParameterValue, SetParametersResult
 from rcl_interfaces.srv import GetParameters
 import rclpy
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2, PointField
@@ -36,6 +37,15 @@ import wlsonar.range_image_protocol as rip
 
 # check if ImuBatch exists in the rip module
 RIP_IMU_BATCH_TYPE = getattr(rip, 'ImuBatch', None)
+
+POINT_CLOUD_STRENGTH_WAIT_S = 0.1
+POINT_CLOUD_PENDING_LIMIT = 32
+XYZ_INTENSITY_DTYPE = np.dtype({
+    'names': ['x', 'y', 'z', 'intensity'],
+    'formats': ['<f4', '<f4', '<f4', '<u2'],
+    'offsets': [0, 4, 8, 12],
+    'itemsize': 16,
+})
 
 
 def _proto_timestamp_to_ros_time(proto_ts, fallback_stamp):
@@ -125,6 +135,12 @@ class SonarNode(Node):
         self._stats_timeouts = 0
         self._stats_last_seq_id = -1
         self._stats_start_time = time.monotonic()
+        self._point_cloud_intensity_enabled = self.get_parameter(
+            'point_cloud_intensity_enabled').value
+        # The timer and receiver share the queues. Range arrival order is preserved.
+        self._point_cloud_lock = threading.Lock()
+        self._pending_cloud_ranges: dict[int, tuple[float, rip.RangeImage, Header]] = {}
+        self._pending_cloud_strengths: dict[int, tuple[float, rip.BitmapImageGreyscale8]] = {}
 
         self._pub_point_cloud = self.create_publisher(
             PointCloud2,
@@ -146,6 +162,10 @@ class SonarNode(Node):
         diag_period = self.get_parameter('diagnostics_period').get_parameter_value().double_value
         self._diag_timer = self.create_timer(diag_period, self._diagnostics_callback)
         self._heartbeat_timer = self.create_timer(1.0, self._heartbeat_callback)
+        if self._point_cloud_intensity_enabled:
+            self.create_timer(
+                POINT_CLOUD_STRENGTH_WAIT_S / 2, self._flush_pending_point_clouds,
+                clock=Clock(clock_type=ClockType.STEADY_TIME))
 
         about = self._connect_and_configure()
         self._declare_device_parameters(about)
@@ -219,6 +239,10 @@ class SonarNode(Node):
         self.declare_parameter('topic_point_cloud', '~/point_cloud', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
             description='Topic name for PointCloud2 output'))
+        self.declare_parameter('point_cloud_intensity_enabled', False, ParameterDescriptor(
+            type=ParameterType.PARAMETER_BOOL,
+            read_only=True,
+            description='Add a UINT16 linear signal strength field to PointCloud2'))
         self.declare_parameter('topic_range_image', '~/range_image', ParameterDescriptor(
             type=ParameterType.PARAMETER_STRING,
             description='Topic name for range image output'))
@@ -496,6 +520,8 @@ class SonarNode(Node):
                             self._stats_unknown_packets += 1
                         continue
                     except EOFError:
+                        if self._point_cloud_intensity_enabled:
+                            self._flush_pending_point_clouds(force=True)
                         self._file_playback_finished = True
                         self.get_logger().info('Reached end of sonar_file playback')
                         break
@@ -621,7 +647,10 @@ class SonarNode(Node):
                     f'seq={msg.header.sequence_id}')
             self._publish_camera_info(msg, header)
             self._publish_range_image(msg, header)
-            self._publish_point_cloud(msg, header)
+            if self._point_cloud_intensity_enabled:
+                self._queue_point_cloud_range(msg, header)
+            else:
+                self._publish_point_cloud(msg, header)
         elif isinstance(msg, rip.BitmapImageGreyscale8):
             with self._lock:
                 self._stats_bitmap_images += 1
@@ -633,7 +662,10 @@ class SonarNode(Node):
                     f'freq={msg.frequency}Hz, '
                     f'seq={msg.header.sequence_id}')
             self._publish_camera_info(msg, header)
-            self._publish_intensity_image(msg, header)
+            if msg.type == rip.BitmapImageType.SIGNAL_STRENGTH_IMAGE:
+                self._publish_intensity_image(msg, header)
+                if self._point_cloud_intensity_enabled:
+                    self._queue_point_cloud_strength(msg)
         elif RIP_IMU_BATCH_TYPE is not None and isinstance(msg, rip.ImuBatch):
             with self._lock:
                 self._stats_imu_batches += 1
@@ -696,12 +728,13 @@ class SonarNode(Node):
         self._pub_range_image.publish(img)
 
     def _publish_intensity_image(self, msg: rip.BitmapImageGreyscale8, header: Header):
-        if msg.type != rip.BitmapImageType.SIGNAL_STRENGTH_IMAGE:
-            return
-
         if self._pub_intensity_image.get_subscription_count() == 0:
             return
 
+        if len(msg.image_pixel_data) != msg.height * msg.width:
+            self.get_logger().warn(
+                f'Invalid signal strength bitmap size for seq {msg.header.sequence_id}')
+            return
         pixels = wlsonar.bitmap_image_to_strength_log(msg)
         arr = np.array(pixels, dtype=np.uint8).reshape((msg.height, msg.width))
         arr = arr[::-1, :]
@@ -717,22 +750,68 @@ class SonarNode(Node):
 
         self._pub_intensity_image.publish(img)
 
-    def _publish_point_cloud(self, msg: rip.RangeImage, header: Header):
+    def _queue_point_cloud_range(self, msg: rip.RangeImage, header: Header):
+        if self._pub_point_cloud.get_subscription_count() == 0:
+            return
+        with self._point_cloud_lock:
+            now = time.monotonic()
+            self._pending_cloud_ranges.setdefault(msg.header.sequence_id, (now, msg, header))
+            self._drain_pending_point_clouds(now)
+
+    def _queue_point_cloud_strength(self, msg: rip.BitmapImageGreyscale8):
+        if self._pub_point_cloud.get_subscription_count() == 0:
+            return
+        with self._point_cloud_lock:
+            now = time.monotonic()
+            strengths = self._pending_cloud_strengths
+            strengths.setdefault(msg.header.sequence_id, (now, msg))
+            self._drain_pending_point_clouds(now)
+            if len(strengths) > POINT_CLOUD_PENDING_LIMIT:
+                # Both queues have the same limit, so at least one bitmap is unpaired.
+                oldest_unpaired = next(
+                    seq_id for seq_id in strengths if seq_id not in self._pending_cloud_ranges)
+                strengths.pop(oldest_unpaired)
+
+    def _flush_pending_point_clouds(self, *, force: bool = False):
+        with self._point_cloud_lock:
+            self._drain_pending_point_clouds(time.monotonic(), force=force)
+
+    def _drain_pending_point_clouds(self, now: float, *, force: bool = False):
+        """Publish ready or expired ranges while holding the point cloud lock."""
+        ranges = self._pending_cloud_ranges
+        strengths = self._pending_cloud_strengths
+        cutoff = now - POINT_CLOUD_STRENGTH_WAIT_S
+        while ranges:
+            seq_id = next(iter(ranges))
+            arrival, msg, header = ranges[seq_id]
+            strength_entry = strengths.get(seq_id)
+            if (strength_entry is None and arrival > cutoff and not force
+                    and len(ranges) <= POINT_CLOUD_PENDING_LIMIT):
+                # no matching strength found, and can wait a bit more for one: don't publish yet
+                break
+            ranges.pop(seq_id)
+            strengths.pop(seq_id, None)
+            strength_image = strength_entry[1] if strength_entry is not None else None
+            self._publish_point_cloud(msg, header, strength_image)
+
+        # Discard stale unpaired bitmaps but keep any matched to a queued range.
+        for seq_id, (arrival, _) in list(strengths.items()):
+            if force or (arrival <= cutoff and seq_id not in ranges):
+                strengths.pop(seq_id)
+
+    def _publish_point_cloud(
+        self, msg: rip.RangeImage, header: Header,
+        strength_image: rip.BitmapImageGreyscale8 | None = None,
+    ):
         if self._pub_point_cloud.get_subscription_count() == 0:
             return
 
         voxels = wlsonar.range_image_to_xyz(msg)
-
-        points = []
-        for v in voxels:
-            if v is not None:
-                points.append(v)
-
+        points = [voxel for voxel in voxels if voxel is not None]
         if not points:
             return
 
-        arr = np.array(points, dtype=np.float32)
-
+        xyz = np.array(points, dtype='<f4')
         cloud = PointCloud2()
         cloud.header = header
         cloud.height = 1
@@ -742,13 +821,37 @@ class SonarNode(Node):
             PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
         ]
-        cloud.is_bigendian = False
+        arr = xyz
         cloud.point_step = 12
-        cloud.row_step = 12 * len(points)
+        if self._point_cloud_intensity_enabled:
+            arr = np.zeros(len(points), dtype=XYZ_INTENSITY_DTYPE)
+            arr['x'], arr['y'], arr['z'] = xyz.T
+            if strength_image is not None:
+                self._fill_point_cloud_intensity(msg, strength_image, voxels, arr)
+            cloud.fields.append(
+                PointField(name='intensity', offset=12, datatype=PointField.UINT16, count=1))
+            cloud.point_step = XYZ_INTENSITY_DTYPE.itemsize
+        cloud.is_bigendian = False
+        cloud.row_step = cloud.point_step * cloud.width
         cloud.data = arr.tobytes()
         cloud.is_dense = True
 
         self._pub_point_cloud.publish(cloud)
+
+    def _fill_point_cloud_intensity(self, msg, strength_image, voxels, points):
+        if (msg.width, msg.height, len(voxels)) != (
+            strength_image.width, strength_image.height, len(strength_image.image_pixel_data)
+        ):
+            self.get_logger().warn(
+                f'Strength/range size mismatch for seq {msg.header.sequence_id}')
+            return
+        try:
+            strength = wlsonar.bitmap_image_to_strength_linear(strength_image)
+            points['intensity'] = [value for voxel, value in zip(voxels, strength)
+                                   if voxel is not None]
+        except (TypeError, ValueError, OverflowError) as e:
+            self.get_logger().warn(
+                f'Invalid signal strength for seq {msg.header.sequence_id}: {e}')
 
     def _publish_camera_info(self, msg, header: Header):
         """Publish sonar intrinsics as CameraInfo alongside each image.

@@ -29,6 +29,9 @@ sonar_node:
     unicast_destination_ip: "192.168.1.94"
     unicast_destination_port: 4747
 
+    # Add linear signal strength to point clouds at startup.
+    point_cloud_intensity_enabled: false
+
     # Topic names (use ~/ prefix for node-relative, or absolute like /sonar/points)
     topic_point_cloud: "~/point_cloud"
     topic_range_image: "~/range_image"

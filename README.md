@@ -72,7 +72,7 @@ ros2 run waterlinked_sonar_3d15 sonar_node --ros-args \
 
 | Topic | Type | Description |
 |---|---|---|
-| `~/point_cloud` | `sensor_msgs/PointCloud2` | XYZ point cloud from range images |
+| `~/point_cloud` | `sensor_msgs/PointCloud2` | XYZ point cloud with optional linear signal strength |
 | `~/range_image` | `sensor_msgs/Image` (32FC1) | Range image as float32 distances in meters |
 | `~/intensity_image` | `sensor_msgs/Image` (8UC1) | Logarithmic signal strength image |
 | `~/camera_info` | `sensor_msgs/CameraInfo` | Sonar lens model (pinhole projection) |
@@ -80,6 +80,14 @@ ros2 run waterlinked_sonar_3d15 sonar_node --ros-args \
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Temperature, firmware, system status |
 
 Topic names are configurable via the `topic_*` parameters (see below). The defaults above use the `~/` prefix, which resolves relative to the node name.
+
+Set `point_cloud_intensity_enabled: true` in the startup YAML or pass
+`--ros-args -p point_cloud_intensity_enabled:=true` to `ros2 run` to add a
+`UINT16` `intensity` field. The driver pairs queued range and signal-strength
+packets by sequence ID and keeps matched pairs until publication. A range
+frame becomes eligible to publish after 100 ms without a match. It uses
+intensity `0` when matching strength data is missing or unusable.
+`~/intensity_image` publishes logarithmic signal strength independently.
 
 Images and `CameraInfo` use `<frame_id>_optical` by default. The node publishes
 a static TF so optical +Z points along the native point cloud's +X axis.
@@ -110,6 +118,7 @@ of the sonar's uniformly spaced yaw/pitch samples; corners can differ.
 | `interface_ip` | string | `0.0.0.0` | Local IP for multicast join / unicast bind |
 | `unicast_destination_ip` | string | `""` | Unicast destination IP |
 | `unicast_destination_port` | int | `0` | Unicast destination port |
+| `point_cloud_intensity_enabled` | bool | `false` | Add linear signal strength to point clouds. Requires a restart. |
 | `topic_point_cloud` | string | `~/point_cloud` | Topic name for PointCloud2 output |
 | `topic_range_image` | string | `~/range_image` | Topic name for range image output |
 | `topic_intensity_image` | string | `~/intensity_image` | Topic name for intensity image output |
@@ -212,7 +221,7 @@ You can also inspect the current value of any parameter:
 ros2 param get <node_name> mode
 ```
 
-All other parameters (`sonar_ip`, `frame_id`, `optical_frame_id`, `udp_mode`, `interface_ip`, `unicast_destination_ip`, `unicast_destination_port`, `topic_*`, `diagnostics_period`) are read-only after startup and require a node restart to change.
+All other parameters (`sonar_ip`, `frame_id`, `optical_frame_id`, `udp_mode`, `interface_ip`, `unicast_destination_ip`, `unicast_destination_port`, `point_cloud_intensity_enabled`, `topic_*`, `diagnostics_period`) are read-only after startup and require a node restart to change.
 
 ## Architecture
 
